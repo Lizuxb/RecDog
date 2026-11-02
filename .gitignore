@@ -36,3 +36,13 @@ recordings/
 # Machine-generated files
 .DS_Store
 Thumbs.db
+# Private project documentation (keep only the root README in Git)
+/docs/
+*.md
+*.markdown
+!/README.md
+*.doc
+*.docx
+*.pdf
+*.ppt
+*.pptx
