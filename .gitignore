@@ -1,0 +1,38 @@
+# .NET / IDE / generated outputs
+**/bin/
+**/obj/
+.vs/
+.idea/
+*.user
+*.suo
+TestResults/
+artifacts/
+coverage/
+# Local credentials / configuration
+.env
+.env.*
+!.env.example
+**/appsettings.Local.json
+**/secrets.json
+*.pfx
+*.p12
+*.key
+# Runtime data and large external assets (never version real recordings)
+local-data/
+models/
+recordings/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.mp3
+*.wav
+*.m4a
+*.flac
+*.onnx
+*.gguf
+*.log
+# Machine-generated files
+.DS_Store
+Thumbs.db

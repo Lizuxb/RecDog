@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/RecDog.Core/RecDog.Core.csproj" />
+    <Project Path="src/RecDog.Infrastructure/RecDog.Infrastructure.csproj" />
+    <Project Path="src/RecDog.Desktop/RecDog.Desktop.csproj" />
+  </Folder>
+</Solution>
