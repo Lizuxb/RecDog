@@ -1,5 +1,9 @@
 import type { DocumentContent } from './bridge';
-const text = (value: string, options: Record<string, unknown> = {}) => ({ value, font: '宋体', size: 16, ...options });
+const text = (value: string, options: Record<string, unknown> = {}) => {
+  const { level, ...format } = options;
+  const element = { value, font: '宋体', size: 16, ...format };
+  return level ? { type: 'title', value: '', level, valueList: [element] } : element;
+};
 export const builtins = [
   { id: 'interview', title: '访谈记录', description: '基本信息、访谈内容与补充备注', create: (): DocumentContent => ({
     header: [text('访谈记录', { size: 11, color: '#666666' })],

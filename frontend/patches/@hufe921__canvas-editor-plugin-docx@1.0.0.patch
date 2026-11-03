@@ -1,0 +1,25 @@
+diff --git a/dist/docx.js b/dist/docx.js
+index 98594aade569e51fe9bd0dc3111ecb3a431d93df..8f5073d91a12b6afdc765eb628e1c8e1874895fc 100644
+--- a/dist/docx.js
++++ b/dist/docx.js
+@@ -14549,7 +14549,7 @@ function zp(e) {
+         }
+       ]
+     }), G = await Fo.toBlob(P);
+-    return Cp(G, `${r}.docx`), G;
++    return t.download !== false && Cp(G, `${r}.docx`), G;
+   };
+ }
+ function Tr(e) {
+diff --git a/dist/src/docx/exportDocx.d.ts b/dist/src/docx/exportDocx.d.ts
+index 3efb1a7f6f91abe0a4e711395021fa1622ed7764..eefbcd2e107b5c207f02cf62fddb01954156db8a 100644
+--- a/dist/src/docx/exportDocx.d.ts
++++ b/dist/src/docx/exportDocx.d.ts
+@@ -2,6 +2,7 @@ import { Editor } from '@hufe921/canvas-editor';
+ export interface IExportDocxOption {
+     fileName: string;
+     toc?: boolean;
++    download?: boolean;
+ }
+ declare module '@hufe921/canvas-editor' {
+     interface Command {

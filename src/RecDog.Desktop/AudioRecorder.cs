@@ -26,6 +26,7 @@ public sealed class AudioRecorder : IDisposable
     public bool IsActive { get { lock (sync) return active; } }
     public bool IsPaused { get { lock (sync) return paused; } }
     public event Action<Exception>? Failed;
+    public event Action<byte[]>? PcmAvailable;
 
     internal static void RequireDeviceName(string? expected, string actual)
     {
@@ -123,6 +124,7 @@ public sealed class AudioRecorder : IDisposable
     private void WriteAudio(object? sender, WaveInEventArgs e)
     {
         WaveInEvent? failedSource = null;
+        byte[]? pcm = null;
         lock (sync)
         {
             if (paused || writer is null || captureError is not null) return;
@@ -132,6 +134,7 @@ public sealed class AudioRecorder : IDisposable
                 lastInputAt = Environment.TickCount64;
                 writer.Write(e.Buffer, 0, e.BytesRecorded);
                 byteCount += e.BytesRecorded;
+                pcm = e.Buffer.AsSpan(0, e.BytesRecorded).ToArray();
                 if (byteCount - lastFlush >= writer.WaveFormat.AverageBytesPerSecond)
                 {
                     writer.Flush();
@@ -140,6 +143,8 @@ public sealed class AudioRecorder : IDisposable
             }
             catch (Exception ex) { captureError = ex; failedSource = input; }
         }
+        if (pcm is not null)
+            try { PcmAvailable?.Invoke(pcm); } catch { /* Transcription subscribers must never interrupt audio archiving. */ }
         failedSource?.StopRecording();
     }
 

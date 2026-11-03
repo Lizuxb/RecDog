@@ -1,5 +1,22 @@
 using RecDog.Desktop;
 
+if (args.Length == 3 && args[0] == "--export-audio") {
+    await RecDog.Core.RecordingExport.CopyForPlaybackAsync(args[1], args[2]);
+    using var reader = new NAudio.Wave.MediaFoundationReader(Path.GetFullPath(args[2]));
+    var buffer = new byte[65536]; long decoded = 0; int count;
+    while ((count = reader.Read(buffer, 0, buffer.Length)) > 0) decoded += count;
+    Console.WriteLine($"Exported MP3: duration={reader.TotalTime.TotalSeconds:F3}s, decodedBytes={decoded}");
+    return decoded > 0 ? 0 : 1;
+}
+
+if (args.Length == 2 && args[0] == "--inspect-audio") {
+    using var reader = new NAudio.Wave.MediaFoundationReader(Path.GetFullPath(args[1]));
+    var buffer = new byte[65536]; long decoded = 0; int count;
+    while ((count = reader.Read(buffer, 0, buffer.Length)) > 0) decoded += count;
+    Console.WriteLine($"Windows Media Foundation: duration={reader.TotalTime.TotalSeconds:F3}s, decodedBytes={decoded}, format={reader.WaveFormat}");
+    return decoded > 0 ? 0 : 1;
+}
+
 var failures = 0;
 await Test("Changed device name is rejected before capture", async () => {
     AudioRecorder.RequireDeviceName("USB麦克风", "USB麦克风");
@@ -47,6 +64,12 @@ await Test("Synthetic PCM archives and decodes as MP3", async () => {
         if (!File.Exists(mp3) || new FileInfo(mp3).Length < 1000) throw new Exception("MP3 missing");
         using var reader = new NAudio.Wave.Mp3FileReader(mp3);
         if (reader.TotalTime.TotalSeconds < 1.9) throw new Exception("MP3 duration wrong");
+        var compatible = Path.Combine(directory, "exported.mp3");
+        await RecDog.Core.RecordingExport.CopyForPlaybackAsync(mp3, compatible);
+        using var windows = new NAudio.Wave.MediaFoundationReader(compatible);
+        var buffer = new byte[65536]; long decoded = 0; int count;
+        while ((count = windows.Read(buffer, 0, buffer.Length)) > 0) decoded += count;
+        if (decoded < 44100 * 2) throw new Exception("Windows cannot decode exported MP3");
         var fixtureIndex = Array.IndexOf(args, "--fixture");
         if (fixtureIndex >= 0 && fixtureIndex + 1 < args.Length) {
             var repository = new RecDog.Core.WorkspaceRepository(args[fixtureIndex + 1]);

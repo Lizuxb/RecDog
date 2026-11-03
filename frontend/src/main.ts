@@ -22,7 +22,7 @@ $('#app').innerHTML = `
   <header class="topbar">
     <button class="icon-button mobile-menu" id="menu" aria-label="项目导航">${icon('menu')}</button>
     <div class="scope">工作台 <span>/</span> <span id="scope-name">文档</span></div>
-    <div class="top-actions"><button id="import">${icon('upload')}<span>导入 DOCX</span></button><button id="export" class="primary">${icon('download')}<span>导出 DOCX</span></button></div>
+    <div class="top-actions"><button id="export" class="primary">${icon('upload')}<span>导出</span></button></div>
   </header>
   <main class="sheet">
     <div class="document-heading"><div class="heading-copy"><div class="breadcrumb" id="document-kind">文档草稿</div><button class="title-button" id="rename" title="重命名文档"><h1 id="document-title">访谈记录</h1><span>重命名</span></button></div><div class="heading-actions"><button class="quiet" id="close-current">${icon('close')}<span>关闭</span></button><button class="quiet" id="save-template">${icon('template')}<span>另存为模板</span></button><button class="icon-button" id="toggle-outline" aria-label="收起文档大纲" aria-expanded="true" title="文档大纲">${icon('outline')}</button></div></div>
@@ -39,7 +39,7 @@ $('#app').innerHTML = `
       <button class="tool search-toggle" id="toggle-search" aria-label="查找文档文字" title="查找 Ctrl+F">${icon('search')}</button>
     </div>
     <div class="search-bar" id="search-bar" hidden><label for="find">查找</label><input id="find" placeholder="输入文档中的文字"><button id="find-next">下一处</button><button class="icon-button" id="close-search" aria-label="关闭查找">${icon('close')}</button></div>
-    <div id="save-error" class="inline-error" role="alert" hidden><span></span><button id="retry-save">重试保存</button></div>
+    <div id="save-error" class="inline-error" role="alert" hidden><span></span><button id="retry-save" hidden>重试保存</button><button id="dismiss-error" class="icon-button" aria-label="关闭错误提示" title="关闭提示">×</button></div>
     <div class="work-panes">
       <section class="editor-well" aria-label="文档工作区">
         <div class="paper-context"><span id="paper-name">访谈记录</span><span>A4 <span class="context-dot">·</span> 纵向</span></div>

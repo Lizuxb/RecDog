@@ -11,7 +11,7 @@ try {
     $env:CI = 'true'
     & pnpm --dir frontend run build
     if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed.' }
-    & $dotnetCommand build src/RecDog.Desktop/RecDog.Desktop.csproj -c Release -o artifacts/app-recording-workflow
+    & $dotnetCommand build src/RecDog.Desktop/RecDog.Desktop.csproj -c Release -o artifacts/app
     if ($LASTEXITCODE -ne 0) { throw 'Desktop build failed. Close the new RecDog window before rebuilding.' }
-    Write-Host 'Built artifacts/app-recording-workflow/RecDog.exe. Launch with Start-RecDog.cmd.'
+    Write-Host 'Built artifacts/app/RecDog.exe. Launch with Start-RecDog.cmd.'
 } finally { Pop-Location }

@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@hufe921/canvas-editor-plugin-docx@1.0.0': 22ce925be6a0ab75e21fde629e28f233b787b927e25a09061d4719e6019f8e01
+
 importers:
 
   .:
@@ -13,7 +16,7 @@ importers:
         version: 1.0.6
       '@hufe921/canvas-editor-plugin-docx':
         specifier: 1.0.0
-        version: 1.0.0(@hufe921/canvas-editor@1.0.6)
+        version: 1.0.0(patch_hash=22ce925be6a0ab75e21fde629e28f233b787b927e25a09061d4719e6019f8e01)(@hufe921/canvas-editor@1.0.6)
     devDependencies:
       playwright:
         specifier: 1.58.2
@@ -408,7 +411,7 @@ packages:
 
 snapshots:
 
-  '@hufe921/canvas-editor-plugin-docx@1.0.0(@hufe921/canvas-editor@1.0.6)':
+  '@hufe921/canvas-editor-plugin-docx@1.0.0(patch_hash=22ce925be6a0ab75e21fde629e28f233b787b927e25a09061d4719e6019f8e01)(@hufe921/canvas-editor@1.0.6)':
     dependencies:
       '@hufe921/canvas-editor': 1.0.6
       color: 4.2.3

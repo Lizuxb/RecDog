@@ -10,7 +10,7 @@ public sealed record WorkspaceFolder(string Id, string Name, List<WorkspaceDocum
 public sealed record Workspace(int SchemaVersion, string Id, string Name, string Path, List<WorkspaceDocument> Documents, List<WorkspaceFolder> Folders);
 
 /// <summary>Atomic versioned project storage, serialized against the canonical directory.</summary>
-public sealed class WorkspaceRepository(string path)
+public sealed partial class WorkspaceRepository(string path)
 {
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> Gates = new(StringComparer.OrdinalIgnoreCase);
     public static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
@@ -28,6 +28,7 @@ public sealed class WorkspaceRepository(string path)
             var workspace = await LoadOrCreateUnlockedAsync();
             document = document with { CreatedAt = workspace.Documents.FirstOrDefault(d => d.Id == id) is { } previous ? previous.CreatedAt ?? previous.UpdatedAt : document.UpdatedAt };
             if (workspace.Folders.Any(f => f.Documents.Any(d => d.Id == id))) throw new InvalidDataException("文档已属于人员文件夹，不能改变归属。");
+            await CheckpointDocumentAsync(workspace.Documents.FirstOrDefault(d => d.Id == id), document);
             await WriteAtomicAsync(workspace with { Documents = ReplaceOrAppend(workspace.Documents, document, d => d.Id) });
             return document;
         });
@@ -43,6 +44,7 @@ public sealed class WorkspaceRepository(string path)
             var folder = FindFolder(workspace, folderId);
             document = document with { CreatedAt = folder.Documents.FirstOrDefault(d => d.Id == id) is { } previous ? previous.CreatedAt ?? previous.UpdatedAt : document.UpdatedAt };
             if (workspace.Documents.Any(d => d.Id == id) || workspace.Folders.Any(f => f.Id != folderId && f.Documents.Any(d => d.Id == id))) throw new InvalidDataException("文档标识已属于其他位置。");
+            await CheckpointDocumentAsync(folder.Documents.FirstOrDefault(d => d.Id == id), document);
             await WriteAtomicAsync(ReplaceFolder(workspace, folder with { Documents = ReplaceOrAppend(folder.Documents, document, d => d.Id) }));
             return document;
         });

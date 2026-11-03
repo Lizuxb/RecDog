@@ -13,6 +13,8 @@ public sealed partial class WorkbenchWindow
     private RecordingResult? uncommittedRecording;
     private string? recordingDisplayName;
     private DateTimeOffset recordingStartedAt;
+    private ILiveTranscription? streamingRunner;
+    private string? streamingSessionId;
 
     private object MemorySnapshot()
     {
@@ -43,6 +45,7 @@ public sealed partial class WorkbenchWindow
     private async Task<object?> CloseWorkspaceAsync()
     {
         RequireNoRecording();
+        await CancelTranscriptionAsync(true);
         await File.WriteAllTextAsync(Path.Combine(smokeDirectory ?? appData, "workspace-path.txt"), "!closed");
         workspaceOpen = false;
         return null;
@@ -51,6 +54,7 @@ public sealed partial class WorkbenchWindow
     private async Task<object?> DeleteWorkspaceAsync()
     {
         RequireNoRecording();
+        await CancelTranscriptionAsync(true);
         await repository.LoadOrCreateAsync();
         var target = Path.GetFullPath(repository.DirectoryPath);
         var application = Path.GetFullPath(AppContext.BaseDirectory);
@@ -72,10 +76,11 @@ public sealed partial class WorkbenchWindow
     private async Task<Workspace> DeleteFolderAsync(string id)
     {
         RequireNoRecording();
+        if (TranscriptionStatus()?.FolderId == id) await CancelTranscriptionAsync(true);
         return await repository.DeleteFolderAsync(id);
     }
 
-    private async Task<object> StartRecordingAsync(string folderId, string documentName, int deviceNumber = 0, string? expectedDeviceName = null)
+    private async Task<object> StartRecordingAsync(string folderId, string documentName, int deviceNumber = 0, string? expectedDeviceName = null, bool streaming = false, string? sessionId = null)
     {
         RequireNoRecording();
         var workspace = await repository.LoadOrCreateAsync();
@@ -88,18 +93,63 @@ public sealed partial class WorkbenchWindow
         recordingStartedAt = DateTimeOffset.Now;
         var fileName = folder.Name[..Math.Min(folder.Name.Length, 20)] + "_" + documentName[..Math.Min(documentName.Length, 35)] + "_录音_" + recordingStartedAt.ToString("yyyyMMdd_HHmmss");
         recordingDisplayName = Path.GetFileNameWithoutExtension(AudioRecorder.AvailablePath(Path.GetDirectoryName(sentinel)!, fileName));
-        try { return await recorder.StartAsync(Path.GetDirectoryName(sentinel)!, recordingDisplayName, deviceNumber, expectedDeviceName); }
-        catch { recordingFolderId = null; throw; }
+        try
+        {
+            if (streaming)
+            {
+                try { await StartStreamingAsync(sessionId); }
+                catch (Exception ex) { Post(new { @event = "streamingTranscript", sessionId, text = "", isFinal = true, state = "error", error = ex.Message }); }
+            }
+            var result = await recorder.StartAsync(Path.GetDirectoryName(sentinel)!, recordingDisplayName, deviceNumber, expectedDeviceName);
+            return result;
+        }
+        catch { await FinishStreamingAsync(); recordingFolderId = null; throw; }
     }
 
-    private object? PauseRecording() { recorder.Pause(); return null; }
-    private object? ResumeRecording() { recorder.Resume(); return null; }
+    private async Task StartStreamingAsync(string? sessionId)
+    {
+        var live = await LoadLiveSettingsAsync();
+        // Enforce the user's opt-out even if a stale frontend requests a streaming session.
+        if (live.Provider == "off") return;
+        if (live.Provider is not ("local" or "aliyun")) throw new InvalidOperationException("请在实时识别设置中选择有效的识别方式。");
+        var activeSession = streamingSessionId = string.IsNullOrWhiteSpace(sessionId) ? Guid.NewGuid().ToString("N") : sessionId;
+        void OnUpdate(StreamingUpdate update) => Dispatcher.BeginInvoke(() => Post(new { @event = "streamingTranscript", sessionId = activeSession, text = update.Text, isFinal = update.IsFinal, state = update.State, error = update.Error, sentenceId = update.SentenceId }));
+        if (live.Provider == "aliyun")
+        {
+            if (live.AppKey.Length == 0 || live.ProtectedToken.Length == 0) throw new InvalidOperationException("请在实时识别设置中填写阿里云 AppKey 和临时 Token。");
+            streamingRunner = await AliyunStreaming.StartAsync(live.AppKey, ProtectToken(live.ProtectedToken, true), OnUpdate, CancellationToken.None);
+            recorder.PcmAvailable += OnStreamingPcm;
+            return;
+        }
+        var settings = await ReadTranscriptionSettingsAsync();
+        var model = DiscoverTranscriptionPath(Path.Combine("models", "sherpa-onnx-streaming-zipformer-bilingual-zh-en"))
+            ?? DiscoverTranscriptionPath(Path.Combine("models", "sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30"));
+        var worker = DiscoverTranscriptionPath(Path.Combine("workers", "sherpa_asr", "worker.py"));
+        if (!Path.IsPathFullyQualified(settings.PythonPath) || !File.Exists(settings.PythonPath)) throw new InvalidOperationException("请先在本机转写设置中指定 Python 环境。");
+        if (model is null || worker is null) throw new InvalidOperationException("未找到 sherpa-onnx 流式中文模型或工作进程。");
+        streamingRunner = await StreamingTranscriptionRunner.StartAsync(settings.PythonPath, model, worker, OnUpdate, CancellationToken.None);
+        recorder.PcmAvailable += OnStreamingPcm;
+        Post(new { @event = "streamingTranscript", sessionId = streamingSessionId, text = "", isFinal = false, state = "ready" });
+    }
+    private void OnStreamingPcm(byte[] pcm) => streamingRunner?.TrySendAudio(pcm);
+    private async Task FinishStreamingAsync()
+    {
+        recorder.PcmAvailable -= OnStreamingPcm;
+        var runner = streamingRunner; streamingRunner = null;
+        if (runner is null) return;
+        try { await runner.StopAsync(CancellationToken.None); }
+        catch (Exception ex) { Post(new { @event = "streamingTranscript", sessionId = streamingSessionId, text = "", isFinal = true, state = "error", error = ex.Message }); }
+        finally { await runner.DisposeAsync(); streamingSessionId = null; }
+    }
+    private async Task<object?> PauseRecording() { recorder.Pause(); if (streamingRunner is { } runner) await runner.PauseAsync(CancellationToken.None); return null; }
+    private async Task<object?> ResumeRecording() { recorder.Resume(); if (streamingRunner is { } runner) await runner.ResumeAsync(CancellationToken.None); return null; }
 
     private async Task<WorkspaceRecording> StopRecordingAsync()
     {
         if (recordingFolderId is null) throw new InvalidOperationException("没有正在进行的录音。");
         // If metadata persistence failed, retry the same completed file instead of discarding it.
-        uncommittedRecording ??= await recorder.StopAsync();
+        try { uncommittedRecording ??= await recorder.StopAsync(); }
+        finally { await FinishStreamingAsync(); }
         var result = uncommittedRecording;
         var recording = new WorkspaceRecording(Guid.NewGuid().ToString("N"), Path.GetFileNameWithoutExtension(result.FilePath), Path.GetRelativePath(repository.DirectoryPath, result.FilePath).Replace('\\', '/'), result.DurationMs, recordingStartedAt);
         await repository.SaveRecordingAsync(recordingFolderId, recording);
@@ -141,9 +191,7 @@ public sealed partial class WorkbenchWindow
         var temporary = destination + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            await using (var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, true))
-            await using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, true))
-                await input.CopyToAsync(output);
+            await RecordingExport.CopyForPlaybackAsync(source, temporary);
             File.Move(temporary, destination, true);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }

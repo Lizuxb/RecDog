@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
+  <ItemGroup><Compile Include="../../src/RecDog.Desktop/TranscriptionRunner.cs" Link="TranscriptionRunner.cs"/><Compile Include="../../src/RecDog.Desktop/StreamingTranscriptionRunner.cs" Link="StreamingTranscriptionRunner.cs"/><PackageReference Include="NAudio" Version="2.2.1"/></ItemGroup>
+  <ItemGroup><Compile Include="../../src/RecDog.Desktop/AliyunStreaming.cs" Link="AliyunStreaming.cs"/><Compile Include="../../src/RecDog.Desktop/StreamingPcmResampler.cs" Link="StreamingPcmResampler.cs"/></ItemGroup>
+</Project>

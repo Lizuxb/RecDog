@@ -1,10 +1,15 @@
+import { showExportDialog } from './export-dialog';
 import { request, onHostEvent, isDesktop, type Workspace, type WorkDocument, type DocumentContent, type WorkspaceFolder } from './bridge';
 import { DocumentEditor } from './editor';
+import { TranscriptionPanel, offlineTranscriptionEnabled } from './transcription';
 import { DocumentState } from './document-state.mjs';
 import { documentOwner, tableDimensions, canonicalJson, resourceTime } from './workspace-state.mjs';
 import { builtins } from './templates';
 import { icon } from './icons';
 import { setupPaneResize } from './pane-resize';
+import { LiveTranscriptSession } from './live-transcript.mjs';
+import { showLiveSettings, recognitionOptions, type RecognitionProvider, type LiveSettings } from './live-settings';
+import { showDocumentHistory } from './document-history';
 
 const $ = <T extends HTMLElement = HTMLElement>(selector: string) => document.querySelector<T>(selector)!;
 const esc = (value: string) => value.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
@@ -16,6 +21,7 @@ let folderId: string | null = null;
 let collapsedFolder: string | null = null;
 let projectOpen = true;
 let editor: DocumentEditor | null = null;
+let transcription: TranscriptionPanel;
 let loading = false;
 let busy = false;
 let saving: Promise<void> | null = null;
@@ -31,6 +37,26 @@ let playbackUrl: string | null = null;
 let playbackGeneration = 0;
 let levelPending = false;
 let quietSince = Date.now();
+let liveTranscript: LiveTranscriptSession | null = null;
+let liveTranscriptMessage = '';
+let liveTranscriptAnchorDocument: string | null = null;
+let recognitionProvider: RecognitionProvider = 'off';
+let recognitionSaving = false;
+function applyLiveSettings(settings: LiveSettings) {
+  recognitionProvider = settings.provider;
+  $<HTMLSelectElement>('#recording-recognition').value = recognitionProvider;
+  clearError('recognition');
+  renderRecording();
+}
+async function changeRecognitionProvider() {
+  const select = $<HTMLSelectElement>('#recording-recognition');
+  const provider = select.value;
+  try {
+    requireIdle(); recognitionSaving = true; renderRecording();
+    applyLiveSettings(await request<LiveSettings>('saveLiveRecognitionSettings', { provider }));
+  } catch (reason) { select.value = recognitionProvider; throw reason; }
+  finally { recognitionSaving = false; renderRecording(); }
+}
 async function refreshMicrophones() {
   const select = $<HTMLSelectElement>('#microphone');
   const previous = select.value;
@@ -56,8 +82,12 @@ async function pollLevel() {
 }
 
 function toast(message: string) { $('#toast').textContent = message; $('#toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').hidden = true, 4200); }
-function error(reason: unknown) { $('#save-error span').textContent = reason instanceof Error ? reason.message : String(reason); $('#save-error').hidden = false; }
-const action = (operation: () => unknown) => () => { Promise.resolve().then(operation).catch(error); };
+type ErrorScope = 'save' | 'recognition' | 'recording' | 'operation';
+class SaveFailure extends Error {}
+let errorScope: ErrorScope | null = null;
+function clearError(scope?: ErrorScope) { if (scope && scope !== errorScope) return; $('#save-error').hidden = true; errorScope = null; }
+function error(reason: unknown, scope: ErrorScope = 'operation') { errorScope = reason instanceof SaveFailure ? 'save' : scope; $('#save-error span').textContent = reason instanceof Error ? reason.message : String(reason); $('#retry-save').hidden = errorScope !== 'save'; $('#save-error').hidden = false; }
+const action = (operation: () => unknown, scope: ErrorScope = 'operation') => () => { Promise.resolve().then(operation).then(() => clearError(scope)).catch(reason => error(reason, scope)); };
 function openDialog(title: string, html: string) { $('#dialog-title').textContent = title; $('#dialog-content').innerHTML = html; if (!dialog().open) dialog().showModal(); }
 function nameDialog(title: string, initial: string, submit: (name: string) => Promise<void>) {
   openDialog(title, `<form id="name-form"><label class="field-label" for="name-input">名称</label><input id="name-input" class="name-input" maxlength="100" required value="${esc(initial)}"><div class="dialog-actions"><button type="button" id="cancel-name">取消</button><button type="submit" class="primary">保存</button></div><p id="name-error" class="form-error" role="alert"></p></form>`);
@@ -77,7 +107,7 @@ function status() { $('#save-label').textContent = !isDesktop ? '布局预览 ·
 function releasePlayback() { playbackGeneration++; const audio = document.querySelector<HTMLAudioElement>('#recording-player'); if (audio) { audio.pause(); audio.removeAttribute('src'); audio.load(); $('#playback-panel').hidden = true; } if (playbackUrl) URL.revokeObjectURL(playbackUrl); playbackUrl = null; }
 function displayTime(value: string) { const date = new Date(value); return Number.isNaN(date.getTime()) ? '时间未知' : date.toLocaleString('zh-CN', { hour12: false }); }
 function timeMarkup(value: string) { return `<time datetime="${esc(value)}">${esc(displayTime(value))}</time>`; }
-async function playRecording(id: string) {
+async function loadRecording(id: string, play = false) {
   requireIdle();
   const owner = folderId;
   const item = folder()?.recordings.find(item => item.id === id);
@@ -88,19 +118,22 @@ async function playRecording(id: string) {
   if (generation !== playbackGeneration || owner !== folderId || !projectOpen || recording !== 'idle') return;
   const audio = $<HTMLAudioElement>('#recording-player');
   audio.src = media.url; $('#playback-name').textContent = item.name; $('#playback-panel').hidden = false;
-  try { await audio.play(); } catch (reason) { if (generation === playbackGeneration) throw reason; }
+  if (play) { try { await audio.play(); } catch (reason) { if (generation === playbackGeneration) throw reason; } }
 }
 function recordingActions(id: string) {
   const item = folder()?.recordings.find(item => item.id === id); if (!item) return;
-  openDialog('录音文件', `<p class="dialog-note">${esc(item.name)}<br>${esc(displayTime(item.createdAt))}</p><div class="project-actions"><button id="export-recording">导出 MP3</button><button id="reveal-recording">打开所在文件夹</button><button id="copy-recording-path">复制文件路径</button><button id="delete-recording-action" class="danger">删除录音</button></div>`);
+  openDialog('录音文件', `<p class="dialog-note">${esc(item.name)}<br>${esc(displayTime(item.createdAt))}</p><div class="project-actions">${offlineTranscriptionEnabled ? '<button id="start-transcription">本机转写</button><button id="view-transcription">查看转写</button>' : ''}<button id="export-recording">导出 MP3</button><button id="reveal-recording">打开所在文件夹</button><button id="copy-recording-path">复制文件路径</button><button id="delete-recording-action" class="danger">删除录音</button></div>`);
   const payload = { folderId, id };
-  $('#export-recording').onclick = action(async () => { const result = await request<{ canceled: boolean }>('exportRecording', payload); if (!result.canceled) toast('MP3 已导出'); });
+  if (offlineTranscriptionEnabled) $('#start-transcription').onclick = action(async () => { dialog().close(); await transcription.open(payload.folderId!, item, true); });
+  if (offlineTranscriptionEnabled) $('#view-transcription').onclick = action(async () => { dialog().close(); await transcription.open(payload.folderId!, item); });
+  $('#export-recording').onclick = action(async () => { requireIdle(); await guarded(async () => { showExportDialog(workspace, item.id, 'recording'); }); });
   $('#reveal-recording').onclick = action(() => request('revealRecording', payload));
   $('#copy-recording-path').onclick = action(async () => { await request('copyRecordingPath', payload); toast('录音路径已复制'); });
-  $('#delete-recording-action').onclick = () => confirmDelete('删除录音', '删除这份录音？媒体会移入项目 .trash 目录。', async () => { requireIdle(); releasePlayback(); workspace = await request<Workspace>('deleteRecording', payload); render(); });
+  $('#delete-recording-action').onclick = () => confirmDelete('删除录音', '删除这份录音？媒体会移入项目 .trash 目录。', async () => { requireIdle(); transcription.assertSaved(); transcription.reset(); releasePlayback(); workspace = await request<Workspace>('deleteRecording', payload); render(); });
 }
 function bindRecordingRows(container: HTMLElement) {
-  container.querySelectorAll<HTMLButtonElement>('[data-play]').forEach(button => button.onclick = action(() => playRecording(button.dataset.play!)));
+  container.querySelectorAll<HTMLButtonElement>('[data-play]').forEach(button => button.onclick = action(() => loadRecording(button.dataset.play!, true)));
+  container.querySelectorAll<HTMLButtonElement>('[data-recording]').forEach(button => button.onclick = action(() => loadRecording(button.dataset.recording!)));
   container.querySelectorAll<HTMLButtonElement>('[data-recording-actions]').forEach(button => button.onclick = () => recordingActions(button.dataset.recordingActions!));
 }
 function title() {
@@ -109,28 +142,33 @@ function title() {
   $('#scope-name').textContent = current?.title || (projectOpen ? folder()?.name || workspace.name : '未打开项目');
   $('#document-kind').textContent = current ? (current.kind === 'template' ? '项目模板' : `${folder()?.name || '旧版项目文档'} / 文档草稿`) : folder() ? '人员资料' : '本地项目';
   document.title = `${current?.title || '工作台'} · 听录`;
-  for (const id of ['rename', 'save', 'save-template', 'export', 'toggle-outline', 'close-current', 'delete-current']) $<HTMLButtonElement>(`#${id}`).disabled = !current;
+  for (const id of ['document-history', 'rename', 'save', 'save-template', 'toggle-outline', 'close-current', 'delete-current']) $<HTMLButtonElement>(`#${id}`).disabled = !current;
   $('#workbench-empty').hidden = Boolean(current);
   document.body.classList.toggle('no-document', !current);
 }
 function render() {
   $('#project-name').textContent = projectOpen ? workspace.name : '未打开项目';
-  const resources = [...documents().map(doc => ({ date: resourceTime(doc), html: `<button class="document-item ${doc.id === current?.id ? 'active' : ''}" data-document="${esc(doc.id)}">${icon('file')}<span>${esc(doc.title)}${timeMarkup(doc.createdAt || doc.updatedAt)}</span></button>` })), ...(folder()?.recordings || []).map(item => ({ date: resourceTime(item), html: `<div class="recording-item"><button class="document-item" data-play="${esc(item.id)}" title="播放录音">${icon('file')}<span>MP3 · ${esc(item.name)}${timeMarkup(item.createdAt)}</span></button><button class="icon-button" data-recording-actions="${esc(item.id)}" aria-label="${esc(item.name)}的文件操作" title="导出与文件位置">…</button></div>` }))].sort((a, b) => a.date - b.date);
+  const resources = [...documents().map(doc => ({ date: resourceTime(doc), html: `<button class="document-item ${doc.id === current?.id ? 'active' : ''}" data-document="${esc(doc.id)}">${icon('file')}<span>${esc(doc.title)}${timeMarkup(doc.createdAt || doc.updatedAt)}</span></button>` })), ...(folder()?.recordings || []).map(item => ({ date: resourceTime(item), html: `<div class="recording-item"><button class="document-item" data-recording="${esc(item.id)}" title="选择录音，点击播放键播放">${icon('file')}<span>MP3 · ${esc(item.name)}${timeMarkup(item.createdAt)}</span></button><button class="icon-button" data-recording-actions="${esc(item.id)}" aria-label="${esc(item.name)}的文件操作" title="导出与文件位置">…</button></div>` }))].sort((a, b) => a.date - b.date);
   const resourceHtml = resources.map(item => item.html).join('') || '<p class="side-empty">暂无资料</p>';
   $('#folder-list').innerHTML = projectOpen ? workspace.folders.map(item => {
     const expanded = item.id === folderId && collapsedFolder !== item.id;
-    return `<section class="person-tree"><button class="folder-item ${item.id === folderId ? 'active' : ''}" data-folder="${esc(item.id)}" aria-expanded="${expanded}"><span class="tree-chevron" aria-hidden="true">${expanded ? '⌄' : '›'}</span>${icon('folder')}<span>${esc(item.name)}</span><small>${item.documents.length + item.recordings.length}</small></button>${item.id === folderId ? `<nav id="document-list" class="document-list tree-resources" aria-label="${esc(item.name)}的文档与录音" ${expanded ? '' : 'hidden'}>${resourceHtml}</nav>` : ''}</section>`;
+    return `<section class="person-tree"><div class="person-row ${item.id === folderId ? 'active' : ''}"><button class="tree-chevron" data-folder-toggle="${esc(item.id)}" aria-label="展开或收起${esc(item.name)}" aria-expanded="${expanded}">${expanded ? '⌄' : '›'}</button><button class="folder-item" data-folder="${esc(item.id)}">${icon('folder')}<span>${esc(item.name)}</span><small>${item.documents.length + item.recordings.length}</small></button></div>${item.id === folderId ? `<nav id="document-list" class="document-list tree-resources" aria-label="${esc(item.name)}的文档与录音" ${expanded ? '' : 'hidden'}>${resourceHtml}</nav>` : ''}</section>`;
   }).join('') || '<p class="side-empty">新建人员文件夹来整理资料。</p>' : '';
   if (!folderId) $('#folder-list').insertAdjacentHTML('beforeend', '<nav id="document-list" class="document-list tree-resources">' + (projectOpen ? resourceHtml : '') + '</nav>');
   $('#folder-list').querySelectorAll<HTMLButtonElement>('[data-folder]').forEach(button => button.onclick = action(async () => {
     const selected = button.dataset.folder!;
+    requireIdle();
+    await guarded(async () => { releasePlayback(); folderId = selected; collapsedFolder = null; closeDocument(); render(); });
+  }));
+  $('#folder-list').querySelectorAll<HTMLButtonElement>('[data-folder-toggle]').forEach(button => button.onclick = action(async () => {
+    const selected = button.dataset.folderToggle!;
     if (folderId === selected) { collapsedFolder = collapsedFolder === selected ? null : selected; render(); return; }
     requireIdle();
     await guarded(async () => { releasePlayback(); folderId = selected; collapsedFolder = null; closeDocument(); render(); });
   }));
   bindRecordingRows($('#document-list'));
   $('#document-list').querySelectorAll<HTMLButtonElement>('[data-document]').forEach(button => button.onclick = action(() => switchDocument(allDocuments().find(item => item.id === button.dataset.document)!)));
-  for (const id of ['new-folder', 'templates', 'import']) $<HTMLButtonElement>(`#${id}`).disabled = !projectOpen || !isDesktop;
+  for (const id of ['new-folder', 'templates', 'export']) $<HTMLButtonElement>(`#${id}`).disabled = !projectOpen || !isDesktop;
   $<HTMLButtonElement>('#new-document').disabled = !folder() || !isDesktop;
   renderLanding(); title(); status(); renderRecording();
 }
@@ -140,11 +178,11 @@ function renderLanding() {
   const bind = (id: string, fn: () => unknown) => { const button = document.getElementById(id); if (button) button.onclick = action(fn); };
   bind('landing-project', projectMenu); bind('manage-project', projectMenu); bind('landing-person', newFolder); bind('landing-new-document', templateLibrary);
   bind('rename-folder', () => nameDialog('重命名人员文件夹', person!.name, async name => { await guarded(async () => { await request('renameFolder', { id: person!.id, name }); workspace = await request<Workspace>('bootstrap'); render(); }); }));
-  bind('delete-folder', () => confirmDelete('删除人员文件夹', `删除“${person!.name}”及其全部文档、录音？已删除的媒体保留在项目 .trash 目录。`, async () => { requireIdle(); await guarded(async () => { workspace = await request<Workspace>('deleteFolder', { id: person!.id }); releasePlayback(); folderId = null; closeDocument(); render(); }); }));
+  bind('delete-folder', () => confirmDelete('删除人员文件夹', `删除“${person!.name}”及其全部文档、录音？已删除的媒体保留在项目 .trash 目录。`, async () => { requireIdle(); await guarded(async () => { workspace = await request<Workspace>('deleteFolder', { id: person!.id }); transcription.reset(); releasePlayback(); folderId = null; closeDocument(); render(); }); }));
   $('#workbench-empty').querySelectorAll<HTMLButtonElement>('[data-open-doc]').forEach(button => button.onclick = action(() => switchDocument(person!.documents.find(doc => doc.id === button.dataset.openDoc)!)));
   $('#workbench-empty').querySelectorAll<HTMLButtonElement>('[data-delete-doc]').forEach(button => button.onclick = () => deleteDocument(button.dataset.deleteDoc!));
   bindRecordingRows($('#workbench-empty'));
-  $('#workbench-empty').querySelectorAll<HTMLButtonElement>('[data-delete-recording]').forEach(button => button.onclick = () => confirmDelete('删除录音', '删除这份录音？媒体会移入项目 .trash 目录。', async () => { requireIdle(); releasePlayback(); workspace = await request<Workspace>('deleteRecording', { folderId, id: button.dataset.deleteRecording }); render(); }));
+  $('#workbench-empty').querySelectorAll<HTMLButtonElement>('[data-delete-recording]').forEach(button => button.onclick = () => confirmDelete('删除录音', '删除这份录音？媒体会移入项目 .trash 目录。', async () => { requireIdle(); transcription.assertSaved(); transcription.reset(); releasePlayback(); workspace = await request<Workspace>('deleteRecording', { folderId, id: button.dataset.deleteRecording }); render(); }));
 }
 async function refreshInfo() {
   if (!editor || !current) return;
@@ -158,6 +196,7 @@ async function refreshInfo() {
 function changed() { if (loading || !current) return; state.changed(); status(); clearTimeout(infoTimer); infoTimer = setTimeout(() => void refreshInfo().catch(error), 500); }
 function attachEditor(doc: WorkDocument) {
   editor = new DocumentEditor($('#canvas-editor'), doc.content); editor.onChange = changed; editor.onPages = count => $('#page-count').textContent = `${count} 页`;
+  editor.onUserSelection = range => { if (current?.id === liveTranscriptAnchorDocument) liveTranscript?.retarget(range); };
   editor.onStyle = style => { for (const name of ['bold', 'italic', 'underline'] as const) $(`[data-action="${name}"]`).classList.toggle('selected', style[name]); $<HTMLSelectElement>('#text-style').value = style.level || ''; $<HTMLSelectElement>('#font-family').value = style.font; const size = $<HTMLSelectElement>('#font-size'); if (![...size.options].some(option => option.value === String(style.size))) size.add(new Option(String(style.size))); size.value = String(style.size); };
 }
 function closeDocument() { clearTimeout(infoTimer); loading = true; editor?.destroy(); editor = null; current = null; state.load({ id: '' }); loading = false; $('#word-count').textContent = '— 字'; $('#page-count').textContent = '— 页'; $('#outline-list').innerHTML = ''; render(); }
@@ -165,11 +204,11 @@ async function saveOnce() {
   if (saving) await saving;
   if (!current || !editor || !state.dirty) return;
   const captured = { ...current, content: editor.serialize() }; const owner = documentOwner(workspace, current.id); const snapshot = state.capture();
-  saving = (async () => { const saved = owner ? await request<WorkDocument>('saveFolderDocument', { ...captured, folderId: owner }) : await request<WorkDocument>('saveDocument', captured); const list = owner ? workspace.folders.find(item => item.id === owner)!.documents : workspace.documents; list[list.findIndex(item => item.id === saved.id)] = saved; state.persisted(snapshot); if (current?.id === saved.id) current.updatedAt = saved.updatedAt; $('#save-error').hidden = true; render(); })();
+  saving = (async () => { const saved = owner ? await request<WorkDocument>('saveFolderDocument', { ...captured, folderId: owner }) : await request<WorkDocument>('saveDocument', captured); const list = owner ? workspace.folders.find(item => item.id === owner)!.documents : workspace.documents; list[list.findIndex(item => item.id === saved.id)] = saved; state.persisted(snapshot); if (current?.id === saved.id) current.updatedAt = saved.updatedAt; clearError('save'); render(); })().catch(reason => { throw new SaveFailure(reason instanceof Error ? reason.message : String(reason)); });
   status(); try { await saving; } finally { saving = null; status(); }
 }
 async function flush() { while (saving || state.dirty) await saveOnce(); }
-async function guarded(operation: () => Promise<void>) { if (busy) throw new Error('正在处理上一项操作，请稍后重试。'); busy = true; document.body.classList.add('busy'); try { await flush(); await operation(); } finally { busy = false; document.body.classList.remove('busy'); } }
+async function guarded(operation: () => Promise<void>) { transcription.assertSaved(); if (busy) throw new Error('正在处理上一项操作，请稍后重试。'); busy = true; document.body.classList.add('busy'); try { await flush(); await operation(); } finally { busy = false; document.body.classList.remove('busy'); } }
 async function switchDocument(doc: WorkDocument) { if (current?.id === doc.id) return; await guarded(async () => { closeDocument(); current = structuredClone(doc); state.load(current); loading = true; attachEditor(current); loading = false; render(); await refreshInfo(); }); }
 async function createDocument(name: string, content: DocumentContent, kind: 'document' | 'template' = 'document') {
   if (kind === 'document' && !folder()) throw new Error('请先选择或新建人员文件夹。');
@@ -201,7 +240,7 @@ async function activateProject(method: string, payload: unknown = {}) {
   requireIdle();
   await guarded(async () => {
     const result = await request<Workspace | null>(method, payload); if (!result) return;
-    releasePlayback(); closeDocument(); workspace = result; projectOpen = true; folderId = null; collapsedFolder = null; render(); dialog().close();
+    transcription.reset(); releasePlayback(); closeDocument(); workspace = result; projectOpen = true; folderId = null; collapsedFolder = null; render(); dialog().close();
   });
 }
 async function newProject() {
@@ -224,55 +263,121 @@ async function projectMenu() {
   document.querySelectorAll<HTMLButtonElement>('[data-project-index]').forEach(button => button.onclick = action(() => activateProject('openProject', { path: projects[Number(button.dataset.projectIndex)].path })));
   if (!projectOpen) return;
   $('#rename-project').onclick = () => nameDialog('重命名项目', workspace.name, async name => { requireIdle(); await guarded(async () => { workspace = await request<Workspace>('renameWorkspace', { name }); render(); }); });
-  $('#close-project').onclick = action(async () => { requireIdle(); await guarded(async () => { await request('closeWorkspace'); releasePlayback(); closeDocument(); projectOpen = false; folderId = null; render(); }); await projectMenu(); });
-  $('#delete-project').onclick = () => confirmDelete('删除项目', `删除“${workspace.name}”及其全部资料？项目会移入同级 .RecDog-trash 文件夹，便于手动恢复。`, async () => { requireIdle(); await guarded(async () => { await request('deleteWorkspace'); releasePlayback(); closeDocument(); projectOpen = false; folderId = null; render(); }); });
+  $('#close-project').onclick = action(async () => { requireIdle(); await guarded(async () => { await request('closeWorkspace'); transcription.reset(); releasePlayback(); closeDocument(); projectOpen = false; folderId = null; render(); }); await projectMenu(); });
+  $('#delete-project').onclick = () => confirmDelete('删除项目', `删除“${workspace.name}”及其全部资料？项目会移入同级 .RecDog-trash 文件夹，便于手动恢复。`, async () => { requireIdle(); await guarded(async () => { await request('deleteWorkspace'); transcription.reset(); releasePlayback(); closeDocument(); projectOpen = false; folderId = null; render(); }); });
   $('#project-home').onclick = action(async () => { await guarded(async () => { releasePlayback(); folderId = null; closeDocument(); render(); }); dialog().close(); });
 }
 
-function settings() { void request<{ runtimeVersion: string; appVersion: string; workspacePath: string }>('settings').then(info => { openDialog('设置', `<section class="setting-row"><div><h3>本地项目目录</h3><p>项目包含人员资料、模板、原文件及 MP3 录音。</p></div><div><p class="file-path">${esc(info.workspacePath)}</p><button id="reveal-workspace">在文件夹中查看</button></div></section><section class="setting-row"><div><h3>自动保存</h3><p>每 2 秒保存修改；保存失败时保留当前内容。</p></div><div><strong>RecDog ${esc(info.appVersion)}</strong><p>canvas-editor 1.0.6<br>WebView2 ${esc(info.runtimeVersion)}</p><p>录音仅在本机保存，转写尚未接入。</p></div></section>`); $('#reveal-workspace').onclick = action(() => request('revealWorkspace')); }).catch(error); }
-function renderRecording() { $('.input-monitor').hidden = !['recording', 'paused'].includes(recording) || pendingRecordingSave; $<HTMLSelectElement>('#microphone').disabled = recording !== 'idle' || Boolean(recordingOperation); $<HTMLButtonElement>('#refresh-microphones').disabled = recording !== 'idle' || Boolean(recordingOperation); $('#recording-strip').hidden = !projectOpen; $('#recording-state').textContent = pendingRecordingSave ? '录音已生成 · 保存待重试' : recording === 'idle' ? '本地录音 · MP3' : recording === 'paused' ? '录音已暂停' : recording === 'saving' ? '正在处理录音…' : '正在录音'; const elapsed = recordingMilliseconds + (recording === 'recording' ? Date.now() - recordingTick : 0); $('#recording-time').textContent = `${Math.floor(elapsed / 60000).toString().padStart(2, '0')}:${Math.floor(elapsed / 1000 % 60).toString().padStart(2, '0')}`; $<HTMLButtonElement>('#record-start').disabled = recording !== 'idle' || !current || current.kind !== 'document' || !folderId || !folder()?.documents.some(doc => doc.id === current?.id) || Boolean(recordingOperation); $<HTMLButtonElement>('#record-pause').disabled = !['recording', 'paused'].includes(recording) || pendingRecordingSave || Boolean(recordingOperation); $('#record-pause').textContent = recording === 'paused' ? '继续' : '暂停'; $<HTMLButtonElement>('#record-stop').disabled = !['recording', 'paused'].includes(recording) || Boolean(recordingOperation); $('#record-stop').textContent = pendingRecordingSave ? '重试保存录音' : '停止并保存'; $('#recording-strip small').textContent = recordingFolder ? `归属：${workspace.folders.find(item => item.id === recordingFolder)?.name || '人员文件夹'}` : '录音归属开始时的人员文件夹'; }
+function settings() { void request<{ runtimeVersion: string; appVersion: string; workspacePath: string }>('settings').then(info => { openDialog('设置', `<section class="setting-row"><div><h3>本地项目目录</h3><p>项目包含人员资料、模板、原文件及 MP3 录音。</p></div><div><p class="file-path">${esc(info.workspacePath)}</p><button id="reveal-workspace">在文件夹中查看</button></div></section><section class="setting-row"><div><h3>自动保存</h3><p>每 2 秒保存修改；保存失败时保留当前内容。</p></div><div><strong>RecDog ${esc(info.appVersion)}</strong><p>canvas-editor 1.0.6<br>WebView2 ${esc(info.runtimeVersion)}</p><p>录音保存在本机；云端识别会上传音频。</p><button id="open-live-settings">实时识别设置</button>${offlineTranscriptionEnabled ? '<button id="open-transcription-settings">本机转写设置</button>' : ''}</div></section>`); $('#reveal-workspace').onclick = action(() => request('revealWorkspace')); if (offlineTranscriptionEnabled) $('#open-transcription-settings').onclick = action(() => transcription.settings()); }).catch(error); }
+function renderRecording() { const locked = recording !== 'idle' || Boolean(recordingOperation) || recognitionSaving; $<HTMLSelectElement>('#recording-recognition').disabled = locked; $('.input-monitor').hidden = !['recording', 'paused'].includes(recording) || pendingRecordingSave; $<HTMLSelectElement>('#microphone').disabled = recording !== 'idle' || Boolean(recordingOperation); $<HTMLButtonElement>('#refresh-microphones').disabled = recording !== 'idle' || Boolean(recordingOperation); $('#recording-strip').hidden = !projectOpen; $('#recording-state').hidden = recording === 'idle'; $('#recording-state').textContent = pendingRecordingSave ? '录音已生成 · 保存待重试' : recording === 'idle' ? '' : recording === 'paused' ? '录音已暂停' : recording === 'saving' ? '正在处理录音…' : liveTranscriptMessage ? `录音中 · ${liveTranscriptMessage}` : '正在录音'; const elapsed = recordingMilliseconds + (recording === 'recording' ? Date.now() - recordingTick : 0); $('#recording-time').textContent = `${Math.floor(elapsed / 60000).toString().padStart(2, '0')}:${Math.floor(elapsed / 1000 % 60).toString().padStart(2, '0')}`; $<HTMLButtonElement>('#record-start').disabled = recording !== 'idle' || !current || current.kind !== 'document' || !folderId || !folder()?.documents.some(doc => doc.id === current?.id) || Boolean(recordingOperation) || recognitionSaving; $<HTMLButtonElement>('#record-pause').disabled = !['recording', 'paused'].includes(recording) || pendingRecordingSave || Boolean(recordingOperation); $('#record-pause').textContent = recording === 'paused' ? '继续' : '暂停'; $<HTMLButtonElement>('#record-stop').disabled = !['recording', 'paused'].includes(recording) || Boolean(recordingOperation); $('#record-stop').textContent = pendingRecordingSave ? '重试保存录音' : '停止并保存'; $('#recording-strip small').textContent = recordingFolder ? `归属：${workspace.folders.find(item => item.id === recordingFolder)?.name || '人员文件夹'}` : '录音归属开始时的人员文件夹'; }
 async function runRecording(operation: () => Promise<void>) {
   if (recordingOperation) throw new Error('正在处理录音，请稍后重试。');
   recordingOperation = operation(); renderRecording();
   try { await recordingOperation; } finally { recordingOperation = null; renderRecording(); }
 }
-async function startRecording() { requireIdle(); if (!current || current.kind !== 'document' || !folder() || documentOwner(workspace, current.id) !== folderId) throw new Error('请先打开人员文件夹中的具体文档，再开始录音。'); const owner = folderId; const documentName = current.title; recording = 'saving'; renderRecording(); try { await flush(); releasePlayback(); const deviceId = Number($<HTMLSelectElement>('#microphone').value);
+async function startRecording() {
+  requireIdle();
+  if (recognitionSaving) throw new Error('正在保存识别方式，请稍后开始录音。');
+  if (!current || current.kind !== 'document' || !folder() || documentOwner(workspace, current.id) !== folderId || !editor) throw new Error('请先打开人员文件夹中的具体文档，再开始录音。');
+  const owner = folderId; const documentName = current.title; const targetEditor = editor; const targetDocumentId = current.id;
+  const streaming = recognitionProvider !== 'off';
+  recording = 'saving'; renderRecording();
+  try {
+    await flush(); releasePlayback();
+    const sessionId = streaming ? crypto.randomUUID() : undefined;
+    liveTranscriptMessage = ''; liveTranscriptAnchorDocument = null;
+    if (streaming) {
+      const anchor = targetEditor.captureLiveTranscriptAnchor();
+      liveTranscriptMessage = '正在启动实时转写…';
+      liveTranscript = new LiveTranscriptSession(sessionId!, anchor, targetEditor, status => {
+        liveTranscriptMessage = status.message || (status.state === 'listening' ? '实时转写中' : status.state === 'loading' ? '正在加载转写模型…' : status.state === 'failed' ? '实时转写不可用' : '');
+        if (status.state === 'failed') toast(`实时转写不可用：${status.message || '未知错误'}`);
+      });
+      liveTranscriptAnchorDocument = targetDocumentId;
+    }
+    const deviceId = Number($<HTMLSelectElement>('#microphone').value);
     if (!$<HTMLSelectElement>('#microphone').value) throw new Error('请连接并选择麦克风。');
-    const started = await request<{ device?: string }>('startRecording', { folderId: owner, documentName, deviceId, deviceName: $<HTMLSelectElement>('#microphone').selectedOptions[0].textContent });
-    if (started.device) { $('#microphone').title = started.device; $('#active-microphone').textContent = '录音设备：' + started.device; }
-    quietSince = Date.now(); recordingFolder = owner; recording = 'recording'; recordingMilliseconds = 0; recordingTick = Date.now(); } catch (reason) { recording = 'idle'; throw reason; } finally { renderRecording(); } }
+    const started = await request<{ device?: string }>('startRecording', { folderId: owner, documentName, deviceId, deviceName: $<HTMLSelectElement>('#microphone').selectedOptions[0].textContent, streaming, sessionId });
+    if (editor !== targetEditor || current?.id !== targetDocumentId) throw new Error('录音期间文档发生变化，已取消实时转写。');
+    if (started.device) { $('#microphone').title = started.device;  }
+    quietSince = Date.now(); recordingFolder = owner; recording = 'recording'; recordingMilliseconds = 0; recordingTick = Date.now();
+  } catch (reason) { liveTranscript?.finish(); liveTranscript = null; liveTranscriptMessage = ''; liveTranscriptAnchorDocument = null; recording = 'idle'; throw reason; }
+  finally { renderRecording(); }
+}
 async function pauseRecording() { const wasPaused = recording === 'paused'; await request(wasPaused ? 'resumeRecording' : 'pauseRecording'); if (wasPaused) { recording = 'recording'; recordingTick = Date.now(); } else { recordingMilliseconds += Date.now() - recordingTick; recording = 'paused'; } renderRecording(); }
-async function stopRecording() { if (recording === 'idle') return; if (recording === 'saving') throw new Error('录音尚在处理中，请稍后关闭。'); if (recording === 'recording') recordingMilliseconds += Date.now() - recordingTick; recording = 'saving'; renderRecording(); try { await request('stopRecording'); workspace = await request<Workspace>('bootstrap'); recording = 'idle'; pendingRecordingSave = false; recordingFolder = null; render(); toast('录音已保存为 MP3'); } catch (reason) { const native = await request<{ active: boolean; paused: boolean; pending?: boolean }>('recordingStatus'); pendingRecordingSave = Boolean(native.pending); recording = pendingRecordingSave ? 'paused' : native.active ? (native.paused ? 'paused' : 'recording') : 'idle'; if (recording === 'recording') recordingTick = Date.now(); throw reason; } finally { renderRecording(); } }
+async function stopRecording() { if (recording === 'idle') return; if (recording === 'saving') throw new Error('录音尚在处理中，请稍后关闭。'); if (recording === 'recording') recordingMilliseconds += Date.now() - recordingTick; recording = 'saving'; renderRecording(); try { await request('stopRecording'); workspace = await request<Workspace>('bootstrap'); recording = 'idle'; pendingRecordingSave = false; recordingFolder = null; liveTranscript?.finish(); liveTranscript = null; liveTranscriptMessage = ''; liveTranscriptAnchorDocument = null; render(); toast('录音已保存为 MP3'); } catch (reason) { const native = await request<{ active: boolean; paused: boolean; pending?: boolean }>('recordingStatus'); pendingRecordingSave = Boolean(native.pending); recording = pendingRecordingSave ? 'paused' : native.active ? (native.paused ? 'paused' : 'recording') : 'idle'; if (recording === 'recording') recordingTick = Date.now(); throw reason; } finally { renderRecording(); } }
+
+function receiveStreamingTranscript(event: { sessionId?: string; text?: string; isFinal?: boolean; state?: string; message?: string; error?: string }) {
+  if (!liveTranscript || !liveTranscriptAnchorDocument || current?.id !== liveTranscriptAnchorDocument || editor === null) return;
+  if (liveTranscript.accept(event)) renderRecording();
+}
 
 export function startWorkbench() {
+  const history = document.createElement('button'); history.id = 'document-history'; history.className = 'quiet'; history.textContent = '历史版本';
+  $('.heading-actions').prepend(history);
+  history.onclick = action(async () => {
+    requireIdle(); if (!current) return;
+    await guarded(async () => {
+      const id = current!.id; const expected = () => current!.updatedAt;
+      await showDocumentHistory(current!, async versionId => {
+        requireIdle();
+        if (current?.id !== id) throw new Error('当前文档已变化，请重新打开历史版本。');
+        await flush();
+        const restored = await request<WorkDocument>('restoreDocumentVersion', { id, versionId, expectedUpdatedAt: expected() });
+        const owner = documentOwner(workspace, id);
+        const list = owner ? workspace.folders.find(item => item.id === owner)!.documents : workspace.documents;
+        list[list.findIndex(item => item.id === id)] = restored;
+        closeDocument(); current = structuredClone(restored); state.load(current);
+        loading = true; attachEditor(current); loading = false; render(); await refreshInfo();
+        toast('已恢复历史版本，恢复前的草稿已备份');
+      });
+    });
+  });
+  $('#dialog').addEventListener('click', event => { if ((event.target as HTMLElement).closest('#open-live-settings')) void showLiveSettings(applyLiveSettings).catch(error); });
   setupPaneResize();
+  transcription = new TranscriptionPanel(text => {
+    if (!current || !editor || current.kind !== 'document' || !documentOwner(workspace, current.id)) throw new Error('请先打开人员文件夹中的具体文档。');
+    editor.insertTranscript(text);
+    toast('已插入文档，可撤销');
+  }, offlineTranscriptionEnabled);
   $('.sheet').insertAdjacentHTML('beforeend', '<section id="playback-panel" class="playback-panel" hidden><span id="playback-name"></span><audio id="recording-player" controls></audio><button id="close-playback" class="quiet" aria-label="关闭播放">关闭播放</button></section>');
   $('#close-playback').onclick = releasePlayback;
-  $('.sheet').insertAdjacentHTML('beforeend', '<section class="recording-strip" id="recording-strip"><span id="recording-state">本地录音 · MP3</span><strong id="recording-time">00:00</strong><button id="record-start">开始录音</button><button id="record-pause" disabled>暂停</button><button id="record-stop" disabled>停止并保存</button><label class="microphone-label" for="microphone">麦克风<select id="microphone" aria-label="录音麦克风"><option value="">正在读取设备…</option></select></label><button id="refresh-microphones" title="刷新麦克风列表" aria-label="刷新麦克风列表">刷新</button><span id="active-microphone" class="active-microphone"></span><div class="input-monitor" hidden><div id="input-level" class="signal-squares" role="meter" aria-label="录音声音强度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><span id="input-hint"></span></div><small>录音归属开始时的人员文件夹</small></section>');
+  $('.sheet').insertAdjacentHTML('beforeend', `<section class="recording-strip" id="recording-strip">
+    <strong id="recording-time">00:00</strong>
+    <button id="record-start">开始录音</button><button id="record-pause" disabled>暂停</button><button id="record-stop" disabled>停止并保存</button>
+    <button id="refresh-microphones" class="icon-button" title="刷新麦克风列表" aria-label="刷新麦克风列表">${icon('refresh')}</button>
+    <label class="microphone-label" for="microphone">麦克风<select id="microphone" aria-label="录音麦克风"><option value="">正在读取设备…</option></select></label>
+    <label class="recognition-label" for="recording-recognition">转写<select id="recording-recognition">${recognitionOptions}</select></label>
+    <span id="recording-state" role="status" hidden></span>
+    <div class="input-monitor" hidden><div id="input-level" class="signal-squares" role="meter" aria-label="录音声音强度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">${'<i></i>'.repeat(12)}</div><span id="input-hint"></span></div>
+    <small>录音归属开始时的人员文件夹</small>
+  </section>`);
   $('.work-panes').insertAdjacentHTML('beforebegin', '<section class="workbench-empty" id="workbench-empty" hidden></section>');
   $('.heading-actions').insertAdjacentHTML('afterbegin', '<button class="quiet danger" id="delete-current">删除</button>');
   $('#close-dialog').onclick = () => dialog().close(); $('#menu').onclick = () => document.body.classList.toggle('nav-open');
   $('#new-folder').onclick = action(newFolder); $('#new-document').onclick = templateLibrary; $('#templates').onclick = templateLibrary; $('#settings').onclick = settings; $('#compatibility').onclick = compatibility;
   $('#workspace-picker').onclick = action(projectMenu); $('#open-project').onclick = action(projectMenu);
-  $('#save').onclick = action(async () => { await flush(); toast('草稿已保存'); }); $('#save-status').onclick = action(flush); $('#retry-save').onclick = action(flush);
+  $('#save').onclick = action(async () => { await flush(); toast('草稿已保存'); }); $('#save-status').onclick = action(flush); $('#retry-save').onclick = action(flush, 'save'); $('#dismiss-error').onclick = () => clearError();
   $('#close-current').onclick = action(() => guarded(async () => closeDocument())); $('#delete-current').onclick = () => current && deleteDocument(current.id);
   $('#rename').onclick = () => { if (current) nameDialog('重命名文档', current.title, async name => { current!.title = name; changed(); title(); await flush(); render(); }); };
   $('#save-template').onclick = () => { if (current && editor) nameDialog('另存为模板', `${current.title}模板`, async name => { await flush(); const saved = await request<WorkDocument>('saveDocument', { id: crypto.randomUUID(), title: name, kind: 'template', content: editor!.serialize() }); workspace.documents.push(saved); toast('模板已保存'); }); };
-  $('#import').onclick = action(() => importDocument('document')); $('#export').onclick = action(async () => { if (!current || !editor) return; await flush(); await editor.exportDocx(current.title); });
-  $('#toggle-outline').onclick = () => { const closed = document.body.classList.toggle('outline-closed'); $('#toggle-outline').setAttribute('aria-expanded', String(!closed)); };
+  $('#export').onclick = action(async () => { requireIdle(); await guarded(async () => { showExportDialog(workspace, current?.id); }); });
+  $('#toggle-outline').onclick = action(() => { transcription.assertSaved(); transcription.hide(); const closed = document.body.classList.toggle('outline-closed'); $('#toggle-outline').setAttribute('aria-expanded', String(!closed)); });
   $('#toggle-search').onclick = () => { if (!editor) return; $('#search-bar').hidden = !$('#search-bar').hidden; if (!$('#search-bar').hidden) $('#find').focus(); }; $('#close-search').onclick = () => { $('#search-bar').hidden = true; editor?.search(''); }; $('#find').oninput = () => editor?.search($<HTMLInputElement>('#find').value); $('#find-next').onclick = () => editor?.nextResult();
   document.querySelectorAll<HTMLButtonElement>('[data-action]').forEach(button => { button.onmousedown = event => event.preventDefault(); button.onclick = action(() => { editor?.action(button.dataset.action!); document.querySelector('details[open]')?.removeAttribute('open'); }); });
   $('#insert-table').onclick = action(() => { const [rows, cols] = tableDimensions($<HTMLInputElement>('#table-rows').value, $<HTMLInputElement>('#table-cols').value); editor?.insertTable(rows, cols); document.querySelector('details[open]')?.removeAttribute('open'); });
   $('#font-family').onchange = () => editor?.font($<HTMLSelectElement>('#font-family').value); $('#font-size').onchange = () => editor?.size(Number($<HTMLSelectElement>('#font-size').value)); $('#text-style').onchange = () => editor?.title($<HTMLSelectElement>('#text-style').value); $('#zoom').onchange = () => editor?.zoom(Number($<HTMLSelectElement>('#zoom').value));
   $('#refresh-microphones').onclick = action(refreshMicrophones);
-  $('#microphone').onchange = () => { $('#microphone').title = $<HTMLSelectElement>('#microphone').selectedOptions[0]?.textContent || ''; $('#active-microphone').textContent = ''; };
+  $('#recording-recognition').onchange = action(changeRecognitionProvider, 'recognition');
+  $('#microphone').onchange = () => { $('#microphone').title = $<HTMLSelectElement>('#microphone').selectedOptions[0]?.textContent || ''; };
   setInterval(() => { if (isDesktop) void pollLevel(); }, 150);
-  $('#record-start').onclick = action(() => runRecording(startRecording)); $('#record-pause').onclick = action(() => runRecording(pauseRecording)); $('#record-stop').onclick = action(() => runRecording(stopRecording));
+  $('#record-start').onclick = action(() => runRecording(startRecording), 'recognition'); $('#record-pause').onclick = action(() => runRecording(pauseRecording), 'recording'); $('#record-stop').onclick = action(() => runRecording(stopRecording), 'recording');
+  onHostEvent('streamingTranscript', receiveStreamingTranscript);
   document.addEventListener('keydown', event => { if (event.ctrlKey && event.key.toLowerCase() === 's') { event.preventDefault(); void flush().catch(error); } if (event.ctrlKey && event.key.toLowerCase() === 'f' && current) { event.preventDefault(); $('#search-bar').hidden = false; $('#find').focus(); } });
   onHostEvent('closing', () => { void (async () => { try { if (recordingOperation) await recordingOperation; if (recording !== 'idle') await runRecording(stopRecording); await guarded(async () => { await request('closeReady'); }); } catch (reason) { error(reason); await request('closeAbort'); } })(); });
-  onHostEvent('recordingError', event => { if (recording === 'recording') recordingMilliseconds += Date.now() - recordingTick; recording = 'paused'; renderRecording(); error(`录音设备发生错误，请停止保存。${event.error || ''}`); });
+  onHostEvent('recordingError', event => { if (recording === 'recording') recordingMilliseconds += Date.now() - recordingTick; recording = 'paused'; renderRecording(); error(`录音设备发生错误，请停止保存。${event.error || ''}`, 'recording'); });
   onHostEvent('exported', event => toast(`已导出：${event.path?.split(/[\\/]/).at(-1) || 'DOCX'}`)); onHostEvent('exportCanceled', () => toast('已取消导出')); onHostEvent('exportFailed', event => error(event.error));
-  window.recDogReady = (async () => { workspace = isDesktop ? await request<Workspace>('bootstrap') : { schemaVersion: 2, id: 'preview', name: '文档布局预览', path: '', documents: [], folders: [] }; if (isDesktop) projectOpen = (await request<{ open: boolean }>('workspaceStatus')).open; workspace.folders ||= []; if (isDesktop) await refreshMicrophones(); render(); renderRecording(); if (isDesktop && !projectOpen) await projectMenu(); if (!isDesktop) $('#project-name').textContent = '文档布局预览'; setInterval(() => { if (isDesktop && !busy && state.dirty) void saveOnce().catch(error); renderRecording(); }, 2000); setInterval(renderRecording, 1000); })().catch(reason => { error(reason); throw reason; });
+  window.recDogReady = (async () => { workspace = isDesktop ? await request<Workspace>('bootstrap') : { schemaVersion: 2, id: 'preview', name: '文档布局预览', path: '', documents: [], folders: [] }; if (isDesktop) projectOpen = (await request<{ open: boolean }>('workspaceStatus')).open; workspace.folders ||= []; if (isDesktop) { await refreshMicrophones(); try { applyLiveSettings(await request<LiveSettings>('liveRecognitionSettings')); } catch (reason) { error(reason); } } render(); renderRecording(); if (isDesktop && !projectOpen) await projectMenu(); if (!isDesktop) $('#project-name').textContent = '文档布局预览'; setInterval(() => { if (isDesktop && !busy && state.dirty) void saveOnce().catch(error); renderRecording(); }, 2000); setInterval(renderRecording, 1000); })().catch(reason => { error(reason); throw reason; });
   window.recDogSmokeTest = async () => {
     await window.recDogReady;
     const initiallyEmpty = !projectOpen;

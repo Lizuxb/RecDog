@@ -1,0 +1,2 @@
+patchedDependencies:
+  '@hufe921/canvas-editor-plugin-docx@1.0.0': patches/@hufe921__canvas-editor-plugin-docx@1.0.0.patch

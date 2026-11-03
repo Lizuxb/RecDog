@@ -19,6 +19,7 @@ public sealed partial class WorkbenchWindow : Window
     private readonly string appData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RecDog");
     private readonly string? requestedWorkspace;
     private readonly string? smokeDirectory;
+    private readonly string? smokeTranscriptionScript;
     private readonly List<TaskCompletionSource<bool>> downloads = [];
     private readonly TaskCompletionSource<bool> downloadStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private WorkspaceRepository repository = null!;
@@ -31,6 +32,7 @@ public sealed partial class WorkbenchWindow : Window
     {
         requestedWorkspace = Argument(args, "--workspace");
         smokeDirectory = Argument(args, "--smoke-test");
+        smokeTranscriptionScript = smokeDirectory is null ? null : Argument(args, "--smoke-transcription-script");
         Title = "听录 · 文档工作台";
         Width = 1500; Height = 960; MinWidth = 1000; MinHeight = 680;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
@@ -88,7 +90,7 @@ public sealed partial class WorkbenchWindow : Window
             };
             web.Navigate("https://recdog.local/index.html");
             recorder.Failed += ex => Dispatcher.InvokeAsync(() => Post(new { @event = "recordingError", error = ex.Message }));
-            Closed += (_, _) => { recorder.Dispose(); browser.Dispose(); };
+            Closed += (_, _) => { transcriptionCancellation?.Cancel(); recorder.Dispose(); if (streamingRunner is { } live) _ = live.DisposeAsync(); browser.Dispose(); };
         }
         catch (Exception ex) { await FailInitializationAsync(ex); }
     }
@@ -128,10 +130,19 @@ public sealed partial class WorkbenchWindow : Window
             id = root.GetProperty("id").GetString();
             if (string.IsNullOrWhiteSpace(id)) throw new InvalidDataException("请求缺少标识。");
             var method = root.GetProperty("method").GetString();
-            if (!workspaceOpen && method is not ("workspaceStatus" or "selectWorkspace" or "settings" or "closeReady" or "closeAbort" or "recordingStatus" or "bootstrap" or "recordingDevices" or "recordingLevel" or "projectList" or "projectDefaults" or "createProject" or "openProject" or "chooseProjectParent")) throw new InvalidOperationException("请先打开项目。");
+            if (!workspaceOpen && method is not ("liveRecognitionSettings" or "saveLiveRecognitionSettings" or "transcriptionSettings" or "saveTranscriptionSettings" or "transcriptionStatus" or "cancelTranscription" or "workspaceStatus" or "selectWorkspace" or "settings" or "closeReady" or "closeAbort" or "recordingStatus" or "bootstrap" or "recordingDevices" or "recordingLevel" or "projectList" or "projectDefaults" or "createProject" or "openProject" or "chooseProjectParent")) throw new InvalidOperationException("请先打开项目。");
             var payload = root.TryGetProperty("payload", out var value) ? value : JsonSerializer.SerializeToElement(new { });
             object? result = method switch
             {
+                "liveRecognitionSettings" => await LiveSettingsViewAsync(),
+                "saveLiveRecognitionSettings" => await SaveLiveSettingsAsync(Text(payload, "provider"), payload.TryGetProperty("appKey", out var appKey) ? appKey.GetString() : null, payload.TryGetProperty("token", out var token) ? token.GetString() ?? "" : "", payload.TryGetProperty("clearToken", out var clearToken) && clearToken.GetBoolean()),
+                "transcriptionSettings" => await ReadTranscriptionSettingsAsync(),
+                "saveTranscriptionSettings" => await SaveTranscriptionSettingsAsync(Text(payload, "pythonPath"), Text(payload, "modelPath")),
+                "startTranscription" => await StartTranscriptionAsync(Text(payload, "folderId"), Text(payload, "id")),
+                "transcriptionStatus" => TranscriptionStatus(),
+                "cancelTranscription" => await CancelTranscriptionAsync(),
+                "readTranscript" => await new TranscriptRepository(repository).ReadAsync(Text(payload, "folderId"), Text(payload, "id")),
+                "saveTranscript" => await new TranscriptRepository(repository).SaveAsync(Text(payload, "folderId"), Text(payload, "id"), Text(payload, "text"), payload.GetProperty("revision").GetInt32()),
                 "projectList" => await Catalog.ListAsync(),
                 "projectDefaults" => new { name = await Catalog.NextNameAsync(), parent = Catalog.DefaultRoot },
                 "createProject" => await CreateProjectAsync(Text(payload, "name"), payload.TryGetProperty("parent", out var parent) ? parent.GetString() : null),
@@ -140,6 +151,10 @@ public sealed partial class WorkbenchWindow : Window
                 "bootstrap" => workspaceOpen ? await repository.LoadOrCreateAsync() : new Workspace(2, "empty", "未打开项目", repository.DirectoryPath, [], []),
                 "saveDocument" => await repository.SaveDocumentAsync(Text(payload, "id"), Text(payload, "title"), Text(payload, "kind"), payload.GetProperty("content")),
                 "saveFolderDocument" => await repository.SaveFolderDocumentAsync(Text(payload, "folderId"), Text(payload, "id"), Text(payload, "title"), payload.GetProperty("content")),
+                "listDocumentVersions" => await repository.ListDocumentVersionsAsync(Text(payload, "id")),
+                "readDocumentVersion" => await repository.ReadDocumentVersionAsync(Text(payload, "id"), Text(payload, "versionId")),
+                "createDocumentVersion" => await repository.CreateDocumentVersionAsync(Text(payload, "id"), Text(payload, "label")),
+                "restoreDocumentVersion" => await RestoreDocumentVersionAsync(payload),
                 "workspaceStatus" => new { open = workspaceOpen },
                 "createFolder" => await repository.CreateFolderAsync(Text(payload, "id"), Text(payload, "name")),
                 "renameFolder" => await repository.RenameFolderAsync(Text(payload, "id"), Text(payload, "name")),
@@ -148,9 +163,9 @@ public sealed partial class WorkbenchWindow : Window
                 "renameWorkspace" => await repository.RenameAsync(Text(payload, "name")),
                 "closeWorkspace" => await CloseWorkspaceAsync(),
                 "deleteWorkspace" => await DeleteWorkspaceAsync(),
-                "startRecording" => await StartRecordingAsync(Text(payload, "folderId"), Text(payload, "documentName"), payload.TryGetProperty("deviceId", out var device) ? device.GetInt32() : 0, payload.TryGetProperty("deviceName", out var deviceName) ? deviceName.GetString() : null),
-                "pauseRecording" => PauseRecording(),
-                "resumeRecording" => ResumeRecording(),
+                "startRecording" => await StartRecordingAsync(Text(payload, "folderId"), Text(payload, "documentName"), payload.TryGetProperty("deviceId", out var device) ? device.GetInt32() : 0, payload.TryGetProperty("deviceName", out var deviceName) ? deviceName.GetString() : null, payload.TryGetProperty("streaming", out var streaming) && streaming.GetBoolean(), payload.TryGetProperty("sessionId", out var session) ? session.GetString() : null),
+                "pauseRecording" => await PauseRecording(),
+                "resumeRecording" => await ResumeRecording(),
                 "stopRecording" => await StopRecordingAsync(),
                 "recordingDevices" => AudioRecorder.Devices(),
                 "recordingLevel" => new { peak = recorder.Peak },
@@ -160,12 +175,16 @@ public sealed partial class WorkbenchWindow : Window
                 "exportRecording" => await ExportRecordingAsync(Text(payload, "folderId"), Text(payload, "id")),
                 "revealRecording" => await RecordingPathActionAsync(Text(payload, "folderId"), Text(payload, "id"), false),
                 "copyRecordingPath" => await RecordingPathActionAsync(Text(payload, "folderId"), Text(payload, "id"), true),
-                "deleteRecording" => await repository.DeleteRecordingAsync(Text(payload, "folderId"), Text(payload, "id")),
+                "deleteRecording" => await DeleteTranscribedRecordingAsync(Text(payload, "folderId"), Text(payload, "id")),
                 "selectWorkspace" => await SelectWorkspaceAsync(payload.TryGetProperty("create", out var create) && create.GetBoolean()),
                 "importDocx" => await ImportDocxAsync(),
-                "settings" => new { runtimeVersion = browser.CoreWebView2.Environment.BrowserVersionString, appVersion = Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "0.1.0", workspacePath = repository.DirectoryPath },
+                "beginExport" => await BeginExportAsync(payload),
+                "writeExportDocument" => await WriteExportDocumentAsync(payload),
+                "finishExport" => await FinishExportAsync(payload),
+                "cancelExport" => await CancelExportAsync(payload),
+                "settings" => new { runtimeVersion = browser.CoreWebView2.Environment.BrowserVersionString, appVersion = Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.5.0", workspacePath = repository.DirectoryPath },
                 "revealWorkspace" => RevealWorkspace(),
-                "closeReady" => ApproveClose(),
+                "closeReady" => await ApproveClose(),
                 "closeAbort" => AbortClose(),
                 "smokeComplete" when smokeDirectory is not null => await CompleteSmokeAsync(payload),
                 "smokeFailed" when smokeDirectory is not null => await SmokeFailedAsync(Text(payload, "message")),
@@ -213,6 +232,7 @@ public sealed partial class WorkbenchWindow : Window
     }
     private async Task<Workspace> ActivateProjectAsync(string path)
     {
+        await CancelTranscriptionAsync(true);
         var next = new WorkspaceRepository(path);
         var workspace = await next.LoadOrCreateAsync();
         await Catalog.RememberAsync(path);
@@ -289,6 +309,7 @@ public sealed partial class WorkbenchWindow : Window
 
     private void OnClosing(object? sender, CancelEventArgs e)
     {
+        transcriptionCancellation?.Cancel();
         if (closeApproved || !initialized) return;
         e.Cancel = true;
         if (closingRequested) return;
@@ -296,10 +317,12 @@ public sealed partial class WorkbenchWindow : Window
         Post(new { @event = "closing" });
     }
 
-    private object? ApproveClose()
+    private async Task<object?> ApproveClose()
     {
         if (!closingRequested) throw new InvalidOperationException("没有待处理的关闭请求。");
         RequireNoRecording();
+        await CancelTranscriptionAsync(true);
+        if (exportSession is { } session) { await session.DisposeAsync(); exportSession = null; }
         closeApproved = true;
         _ = Dispatcher.BeginInvoke(Close);
         return null;
@@ -308,19 +331,23 @@ public sealed partial class WorkbenchWindow : Window
 
     private async Task StartSmokeAsync()
     {
-        await browser.CoreWebView2.ExecuteScriptAsync("""
+        var script = """
             (async () => {
               try {
                 for (let i=0; i<300 && (!window.recDogReady || !window.recDogSmokeTest); i++) await new Promise(r=>setTimeout(r,100));
                 if (!window.recDogSmokeTest) throw new Error('Smoke test globals were not exposed');
                 await window.recDogReady;
                 const result = await window.recDogSmokeTest();
+                /* TRANSCRIPTION_SMOKE */
                 window.chrome.webview.postMessage({id:'native-smoke',method:'smokeComplete',payload:result});
               } catch (error) {
                 window.chrome.webview.postMessage({id:'native-smoke',method:'smokeFailed',payload:{message:String(error?.stack || error)}});
               }
             })();
-            """);
+            """;
+        if (smokeTranscriptionScript is not null)
+            script = script.Replace("/* TRANSCRIPTION_SMOKE */", await File.ReadAllTextAsync(smokeTranscriptionScript));
+        await browser.CoreWebView2.ExecuteScriptAsync(script);
         _ = SmokeTimeoutAsync();
     }
 
