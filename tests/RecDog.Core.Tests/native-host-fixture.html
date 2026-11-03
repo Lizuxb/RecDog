@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="UTF-8"><title>Native bridge fixture</title>
+<style>body{font:18px system-ui;margin:48px;color:#192129}pre{white-space:pre-wrap}</style>
+<h1>原生桥接验证</h1><pre id="status">正在测试…</pre>
+<script>
+const pending = new Map();
+let sequence = 0;
+window.chrome.webview.addEventListener('message', ({data}) => {
+  const request = pending.get(data.id);
+  if (request) { pending.delete(data.id); data.ok ? request.resolve(data.result) : request.reject(Error(data.error)); }
+});
+function host(method, payload = {}) {
+  const id = 'fixture-' + ++sequence;
+  return new Promise((resolve, reject) => { pending.set(id, {resolve, reject}); window.chrome.webview.postMessage({id,method,payload}); });
+}
+function check(condition, message) { if (!condition) throw Error(message); }
+window.recDogReady = Promise.resolve();
+window.recDogSmokeTest = async () => {
+  const initial = await host('bootstrap');
+  check(initial.schemaVersion === 1, 'Workspace schema mismatch');
+  const content = {main:[{value:'访谈记录：中文保存与重开。',bold:true}],header:[],footer:[]};
+  const saved = await host('saveDocument', {id:'native-fixture',title:'原生桥接验证',kind:'document',content});
+  check(saved.id === 'native-fixture' && saved.kind === 'document' && !saved.documents, 'saveDocument must return document');
+  const reopened = await host('bootstrap');
+  check(JSON.stringify(reopened.documents.find(d=>d.id===saved.id).content) === JSON.stringify(content), 'Native persisted roundtrip failed');
+  let rejected = false;
+  try { await host('saveDocument', {id:'invalid',title:'不能保存',kind:'unsupported',content}); } catch { rejected = true; }
+  check(rejected, 'Native invalid save was accepted');
+  const settings = await host('settings');
+  check(settings.runtimeVersion && settings.appVersion && settings.workspacePath === reopened.path, 'Settings response incomplete');
+  // A ZIP fixture verifies only native Blob-download transport; plugin fidelity is tested in the real editor.
+  const bytes = Uint8Array.from(atob('UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA=='), c=>c.charCodeAt(0));
+  const url = URL.createObjectURL(new Blob([bytes], {type:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'}));
+  const link = document.createElement('a'); link.href = url; link.download = 'fixture.docx'; link.click();
+  document.getElementById('status').textContent = '已通过：中文保存、重新读取、无效请求拒绝、设置与下载桥接。';
+  return {savedId:saved.id,roundTripMatch:true,docxBytes:bytes.length,fixture:true};
+};
+</script></html>

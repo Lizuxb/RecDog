@@ -1,48 +1,62 @@
-# .NET / IDE / generated outputs
-**/bin/
-**/obj/
-.vs/
-.idea/
-*.user
-*.suo
-TestResults/
-artifacts/
-coverage/
-# Local credentials / configuration
+# Local agent dependencies
+.agents/
+
+# Dependencies and build output
+node_modules/
+dist/
+build/
+
+# Local configuration and credentials
 .env
 .env.*
 !.env.example
-**/appsettings.Local.json
-**/secrets.json
-*.pfx
-*.p12
-*.key
-# Runtime data and large external assets (never version real recordings)
+
+# Editor and operating system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+
+# Local .NET / frontend tools and generated artifacts
+.tools/
+**/bin/
+**/obj/
+artifacts/
+frontend/dist/
+.pnpm-store/
+
+# Local design/agent metadata and retired prototype (preserved locally)
+.taste-skill/
+skills-lock.json
+prototype/
+
+# Internal documentation stays local, matching the existing repository policy
+/docs/
+/GLOSSARY.md
+
+# Runtime data, models and private credentials
 local-data/
 models/
 recordings/
-*.db
-*.db-shm
-*.db-wal
-*.sqlite
-*.sqlite3
 *.mp3
 *.wav
 *.m4a
 *.flac
 *.onnx
 *.gguf
-*.log
-# Machine-generated files
-.DS_Store
-Thumbs.db
-# Private project documentation (keep only the root README in Git)
-/docs/
-*.md
-*.markdown
-!/README.md
-*.doc
-*.docx
-*.pdf
-*.ppt
-*.pptx
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.pfx
+*.p12
+*.key
+**/secrets.json
+**/appsettings.Local.json
+.vs/
+*.user
+*.suo
+TestResults/
+coverage/

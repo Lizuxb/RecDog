@@ -1,0 +1,237 @@
+import { chromium } from 'playwright';
+import { createServer } from 'node:http';
+import { readFile, mkdir, writeFile } from 'node:fs/promises';
+// Design inspection is an optional local tool; cloned repositories still run all functional tests.
+let designInspection;
+try {
+  designInspection = { ...await import('../../.agents/skills/design-taste-frontend/scripts/lib/probe.mjs'), ...await import('../../.agents/skills/design-taste-frontend/scripts/lib/rules.mjs') };
+} catch (error) { if (error.code !== 'ERR_MODULE_NOT_FOUND') throw error; }
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import assert from 'node:assert/strict';
+
+const root = fileURLToPath(new URL('../dist/', import.meta.url));
+const output = fileURLToPath(new URL('../../artifacts/ui-tests/', import.meta.url));
+await mkdir(output, { recursive: true });
+const server = createServer(async (request, response) => {
+  if (request.url === '/fixture.wav') {
+    const data = Buffer.alloc(44 + 16000); data.write('RIFF', 0); data.writeUInt32LE(data.length - 8, 4); data.write('WAVEfmt ', 8); data.writeUInt32LE(16, 16); data.writeUInt16LE(1, 20); data.writeUInt16LE(1, 22); data.writeUInt32LE(8000, 24); data.writeUInt32LE(16000, 28); data.writeUInt16LE(2, 32); data.writeUInt16LE(16, 34); data.write('data', 36); data.writeUInt32LE(16000, 40); response.setHeader('Content-Type', 'audio/wav'); response.end(data); return;
+  }
+  try { const file = path.join(root, new URL(request.url, 'http://localhost').pathname === '/' ? 'index.html' : decodeURIComponent(new URL(request.url, 'http://localhost').pathname)); const data = await readFile(file); response.setHeader('Content-Type', file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html'); response.end(data); }
+  catch { response.writeHead(404); response.end(); }
+});
+await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+const browser = await chromium.launch({ channel: 'msedge', headless: true });
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, acceptDownloads: true });
+const errors = [];
+page.on('pageerror', error => errors.push(String(error)));
+await page.addInitScript(() => {
+  const workspace = { schemaVersion: 2, id: 'test', name: '验收项目', path: 'C:/fixture', documents: [], folders: [] };
+  window.testWorkspace = workspace;
+  window.saveFailure = false;
+  window.recordingSaveFailure = false;
+  window.nativeMethods = [];
+  window.recordingDelay = 0;
+  window.lastRecordingStart = null;
+  window.playbackDelay = 0;
+  window.sendNativeEvent = event => listener({ data: { event } });
+  window.inputPeak = 0.5;
+  window.projects = [{ name: workspace.name, path: workspace.path }];
+  window.createdProjects = [];
+  let projectIsOpen = true;
+  let listener; let recording = false;
+  let pendingRecording = false;
+  window.chrome = { webview: { addEventListener(_name, callback) { listener = callback; }, postMessage(message) { window.nativeMethods.push(message.method); setTimeout(() => {
+    let result; let error;
+    try {
+      const p = message.payload;
+      switch (message.method) {
+        case 'bootstrap': result = workspace; break;
+        case 'recordingDevices': result = [{ id: 0, name: '内置麦克风' }, { id: 1, name: 'USB 访谈麦克风' }]; break;
+        case 'recordingLevel': result = { peak: window.inputPeak }; break;
+        case 'projectList': result = window.projects; break;
+        case 'projectDefaults': result = { name: '项目' + String(window.createdProjects.length + 1).padStart(2, '0'), parent: 'C:/Documents/RecDog/Projects' }; break;
+        case 'chooseProjectParent': result = 'C:/custom-projects'; break;
+        case 'createProject': window.createdProjects.push(p); workspace.name = p.name; workspace.path = p.parent + '/' + p.name; workspace.documents = []; workspace.folders = []; projectIsOpen = true; window.projects.push({ name: workspace.name, path: workspace.path }); result = workspace; break;
+        case 'openProject': workspace.name = window.projects.find(item => item.path === p.path).name; workspace.path = p.path; projectIsOpen = true; result = workspace; break;
+        case 'workspaceStatus': result = { open: projectIsOpen }; break;
+        case 'createFolder': result = { id: p.id, name: p.name, documents: [], recordings: [] }; workspace.folders.push(result); break;
+        case 'renameFolder': result = workspace.folders.find(f => f.id === p.id); result.name = p.name; break;
+        case 'deleteFolder': workspace.folders = workspace.folders.filter(f => f.id !== p.id); result = workspace; break;
+        case 'saveDocument': case 'saveFolderDocument': {
+          if (window.saveFailure) throw new Error('模拟磁盘保存失败');
+          const list = message.method === 'saveFolderDocument' ? workspace.folders.find(f => f.id === p.folderId).documents : workspace.documents;
+          result = { id: p.id, title: p.title, kind: p.kind, content: p.content, createdAt: list.find(doc => doc.id === p.id)?.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString() };
+          const index = list.findIndex(doc => doc.id === p.id); if (index < 0) list.push(result); else list[index] = result; break;
+        }
+        case 'deleteDocument': workspace.documents = workspace.documents.filter(d => d.id !== p.id); for (const f of workspace.folders) f.documents = f.documents.filter(d => d.id !== p.id); result = workspace; break;
+        case 'startRecording': if (!p.documentName) throw new Error('缺少文档名'); window.lastRecordingStart = p; recording = true; result = { active: true, device: p.deviceId === 1 ? 'USB 访谈麦克风' : '内置麦克风' }; break;
+        case 'readRecording': result = { url: location.origin + '/fixture.wav' }; break;
+        case 'exportRecording': result = { canceled: false }; break;
+        case 'revealRecording': case 'copyRecordingPath': break;
+        case 'pauseRecording': case 'resumeRecording': break;
+        case 'stopRecording': if (window.recordingSaveFailure) { window.recordingSaveFailure = false; pendingRecording = true; recording = false; throw new Error('模拟录音元数据保存失败'); } workspace.folders[0].recordings.push({ id: crypto.randomUUID(), name: '测试录音', relativePath: 'recordings/a/test.mp3', durationMs: 2000, createdAt: new Date().toISOString() }); recording = false; pendingRecording = false; break;
+        case 'recordingStatus': result = { active: recording || pendingRecording, paused: false, pending: pendingRecording }; break;
+        case 'closeReady': if (recording || pendingRecording) throw new Error('录音尚未保存'); break;
+        case 'closeAbort': throw new Error('Unexpected closeAbort');
+        case 'closeWorkspace': projectIsOpen = false; break;
+        default: throw new Error(`Unexpected test method: ${message.method}`);
+      }
+    } catch (reason) { error = reason.message; }
+    listener({ data: JSON.parse(JSON.stringify({ id: message.id, ok: !error, result, error })) });
+  }, message.method === 'startRecording' ? window.recordingDelay : message.method === 'readRecording' ? window.playbackDelay : 0); } } };
+});
+const expectCount = async (selector, count) => { await page.waitForFunction(({ selector, count }) => document.querySelectorAll(selector).length === count, { selector, count }); };
+try {
+  await page.goto(`http://127.0.0.1:${server.address().port}`);
+  await page.evaluate(() => window.recDogReady);
+  assert.equal(await page.locator('.input-monitor').isVisible(), false, '未录音时不显示音量方格');
+  assert.equal(await page.locator('meter').count(), 0);
+  await expectCount('#canvas-editor canvas', 0);
+  await page.click('#new-folder'); await page.fill('#name-input', '人员甲'); await page.click('#name-form button[type=submit]');
+  await expectCount('[data-folder]', 1);
+  assert.equal(await page.locator('#record-start').isDisabled(), true, '必须先打开人员文档，不能从人员首页开始录音');
+  assert.equal(await page.locator('#landing-record').count(), 0);
+  await page.waitForSelector('#landing-new-document'); await page.click('#landing-new-document'); await page.click('[data-builtin="blank"]');
+  await page.waitForSelector('#canvas-editor canvas');
+  await page.locator('#canvas-editor canvas').first().click({ position: { x: 85, y: 80 } });
+  await page.locator('.table-menu summary').click(); await page.fill('#table-rows', '4'); await page.fill('#table-cols', '5'); await page.click('#insert-table');
+  await page.keyboard.press('Control+s');
+  await page.waitForFunction(() => window.testWorkspace.folders[0].documents[0].content.main.some(item => item.type === 'table'));
+  const table = await page.evaluate(() => window.testWorkspace.folders[0].documents[0].content.main.find(item => item.type === 'table'));
+  assert.equal(table.trList.length, 4); assert.equal(table.trList[0].tdList.length, 5);
+  await page.click('#save-template'); await page.fill('#name-input', '可删除模板'); await page.click('#name-form button[type=submit]');
+  await page.waitForFunction(() => window.testWorkspace.documents.length === 1);
+  await page.click('#templates'); await page.click('[data-edit-template]');
+  assert.equal(await page.locator('#record-start').isDisabled(), true, '模板编辑不能创建录音');
+  await page.click('#rename'); await page.fill('#name-input', '独立模板'); await page.click('#name-form button[type=submit]');
+  await page.waitForFunction(() => window.testWorkspace.documents[0].title === '独立模板');
+  assert.equal(await page.evaluate(() => window.testWorkspace.folders[0].documents.length), 1);
+  await page.click('#templates'); await page.click('[data-delete-template]'); await page.click('#confirm-delete');
+  await expectCount('#canvas-editor canvas', 0);
+  assert.equal(await page.evaluate(() => window.testWorkspace.documents.length), 0);
+  await page.click('[data-document]'); await page.waitForSelector('#canvas-editor canvas');
+  await page.screenshot({ path: path.join(output, 'document-1440.png'), fullPage: true });
+  await page.evaluate(() => window.saveFailure = true);
+  await page.click('#rename'); await page.fill('#name-input', '未保存标题'); await page.click('#name-form button[type=submit]'); await page.waitForFunction(() => document.querySelector('#name-error').textContent.includes('模拟磁盘保存失败')); await page.click('#cancel-name');
+  await page.click('#close-current');
+  await page.waitForFunction(() => document.querySelector('#save-error').textContent.includes('模拟磁盘保存失败'));
+  assert.ok(await page.locator('#canvas-editor canvas').count() > 0);
+  await page.evaluate(() => window.saveFailure = false); await page.click('#retry-save'); await page.click('#close-current'); await expectCount('#canvas-editor canvas', 0);
+  assert.equal(await page.locator('#record-start').isDisabled(), true);
+  await page.click('[data-document]'); await page.waitForSelector('#canvas-editor canvas');
+  await page.selectOption('#microphone', '1');
+  await page.click('#record-start'); await page.waitForFunction(() => document.querySelector('#recording-state').textContent === '正在录音');
+  assert.equal(await page.locator('#microphone').isDisabled(), true);
+  assert.equal(await page.evaluate(() => window.lastRecordingStart.deviceId), 1);
+  assert.equal(await page.evaluate(() => window.lastRecordingStart.deviceName), 'USB 访谈麦克风');
+  assert.match(await page.locator('#active-microphone').textContent(), /USB 访谈麦克风/);
+  await page.waitForFunction(() => document.querySelectorAll('#input-level .lit').length > 0);
+  assert.equal(await page.locator('.input-monitor').isVisible(), true);
+  assert.equal(await page.locator('#input-level i').count(), 12);
+  assert.equal(await page.locator('#input-hint').textContent(), '');
+  await page.screenshot({ path: path.join(output, 'recording-squares-1440.png'), fullPage: true });
+  await page.evaluate(() => window.inputPeak = 0.99);
+  await page.waitForFunction(() => document.querySelector('#input-hint').textContent.includes('失真'));
+  await page.evaluate(() => window.inputPeak = 0.5);
+  await page.evaluate(() => window.inputPeak = 0);
+  await page.waitForFunction(() => document.querySelector('#input-hint').textContent.includes('较弱'), { timeout: 8000 });
+  await page.click('#record-pause'); await page.waitForFunction(() => document.querySelector('#recording-state').textContent === '录音已暂停');
+  await page.waitForFunction(() => document.querySelectorAll('#input-level .lit').length === 0);
+  await page.evaluate(() => window.inputPeak = 0.5);
+  await page.click('#record-pause'); await page.evaluate(() => window.recordingSaveFailure = true); await page.click('#record-stop');
+  await page.waitForFunction(() => document.querySelector('#record-stop').textContent === '重试保存录音');
+  assert.equal(await page.locator('#record-stop').isDisabled(), false);
+  await page.click('#record-stop'); await page.waitForFunction(() => window.testWorkspace.folders[0].recordings.length === 1);
+  await page.waitForSelector('#document-list [data-play]');
+  assert.ok(await page.locator('#canvas-editor canvas').count() > 0, '录音保存后保留编辑页面');
+  assert.equal(await page.locator('#document-list time').count(), 2, '文档录音均显示时间');
+  await page.click('[data-folder]');
+  assert.equal(await page.locator('#document-list').isVisible(), false, '收起人员隐藏其资料');
+  assert.ok(await page.locator('#canvas-editor canvas').count() > 0, '收起不关闭文档');
+  await page.click('[data-folder]');
+  assert.equal(await page.locator('#document-list').isVisible(), true);
+  await page.screenshot({ path: path.join(output, 'person-tree-expanded.png'), fullPage: true });
+  assert.equal(await page.locator('#document-list').evaluate(el => el.closest('.person-tree') !== null), true);
+  assert.equal(await page.locator('#document-list > :first-child').getAttribute('data-document') !== null, true, '先建文档排在新录音之前');
+  const leftHandle = page.locator('.sidebar > .pane-resizer');
+  const beforeWidth = await page.locator('.sidebar').evaluate(el => el.getBoundingClientRect().width);
+  const leftBox = await leftHandle.boundingBox();
+  await page.mouse.move(leftBox.x + 4, leftBox.y + 120); await page.mouse.down(); await page.mouse.move(leftBox.x + 64, leftBox.y + 120); await page.mouse.up();
+  assert.ok(await page.locator('.sidebar').evaluate(el => el.getBoundingClientRect().width) > beforeWidth + 40);
+  const rightHandle = page.locator('.outline-panel > .pane-resizer');
+  const beforeRight = await page.locator('.outline-panel').evaluate(el => el.getBoundingClientRect().width);
+  await rightHandle.focus(); await page.keyboard.press('ArrowLeft');
+  assert.ok(await page.locator('.outline-panel').evaluate(el => el.getBoundingClientRect().width) > beforeRight);
+  assert.equal(await page.locator('.sidebar').evaluate(el => getComputedStyle(el).overflowY), 'auto');
+  assert.equal(await page.locator('.outline-panel').evaluate(el => getComputedStyle(el).overflowY), 'auto');
+  assert.equal(await page.evaluate(() => window.lastRecordingStart.documentName), '未保存标题');
+  assert.equal(await page.evaluate(() => 'documentId' in window.lastRecordingStart), false, '不新增文档与录音 ID 关联');
+  await page.click('#document-list [data-play]'); await page.waitForSelector('#playback-panel:not([hidden])');
+  await page.waitForFunction(() => !document.querySelector('#recording-player').paused);
+  await page.screenshot({ path: path.join(output, 'editor-with-playback-1440.png'), fullPage: true });
+  assert.ok(await page.locator('#canvas-editor canvas').count() > 0);
+  const sourceBefore = await page.locator('#recording-player').getAttribute('src');
+  await page.click('#new-document'); await page.click('[data-builtin="blank"]'); await page.waitForSelector('#canvas-editor canvas');
+  assert.equal(await page.locator('#recording-player').getAttribute('src'), sourceBefore, '切换文档不销毁播放器');
+  await page.locator('#document-list [data-recording-actions]').first().click(); await page.click('#export-recording');
+  await page.click('#reveal-recording'); await page.click('#copy-recording-path'); await page.click('#close-dialog');
+  const fileActions = await page.evaluate(() => window.nativeMethods);
+  for (const method of ['exportRecording', 'revealRecording', 'copyRecordingPath']) assert.ok(fileActions.includes(method));
+  await page.evaluate(() => { window.playbackDelay = 100; document.querySelector('#document-list [data-play]').click(); document.querySelector('#record-start').click(); });
+  await page.waitForFunction(() => document.querySelector('#recording-state').textContent === '正在录音');
+  await page.waitForTimeout(200);
+  assert.equal(await page.locator('#recording-player').getAttribute('src'), null, '录音开始后，迟到的回放请求不能重启扬声器');
+  await page.click('#record-stop'); await page.waitForFunction(() => document.querySelector('#recording-state').textContent === '本地录音 · MP3');
+  await page.evaluate(() => { window.nativeMethods = []; window.recordingDelay = 100; document.querySelector('#record-start').click(); setTimeout(() => window.sendNativeEvent('closing'), 20); });
+  await page.waitForFunction(() => window.nativeMethods.includes('closeReady'));
+  const closingCalls = await page.evaluate(() => window.nativeMethods);
+  assert.ok(closingCalls.indexOf('stopRecording') > closingCalls.indexOf('startRecording'));
+  assert.ok(closingCalls.indexOf('closeReady') > closingCalls.indexOf('stopRecording'));
+  await page.click('#record-start'); await page.waitForFunction(() => document.querySelector('#recording-state').textContent === '正在录音');
+  await page.evaluate(() => window.sendNativeEvent('recordingError'));
+  await page.waitForFunction(() => document.querySelector('#recording-state').textContent === '录音已暂停');
+  assert.equal(await page.locator('#record-stop').isDisabled(), false);
+  await page.click('#record-stop'); await page.waitForFunction(() => document.querySelector('#recording-state').textContent === '本地录音 · MP3');
+  await page.screenshot({ path: path.join(output, 'folder-1440.png'), fullPage: true });
+  if (designInspection) {
+  const { probe, layout, app, judge, judgeLayout, judgeApp, APP_SKIP } = designInspection;
+  const measurements = [];
+  for (const width of [1440, 1100, 800]) { await page.setViewportSize({ width, height: 900 }); const m = await page.evaluate(probe); const l = await page.evaluate(layout); const a = await page.evaluate(app); const findings = [...judge(m, { width }), ...judgeLayout(l, { width })].filter(f => !APP_SKIP.has(f.rule || f.id)); findings.push(...judgeApp(a, m, { width })); measurements.push({ width, findings, metrics: m, layout: l, app: a }); }
+  await writeFile(path.join(output, 'design-inspection.json'), JSON.stringify(measurements, null, 2));
+  } else console.log('SKIP optional local design inspection (skill not installed)');
+  for (const width of [1100, 800]) { await page.setViewportSize({ width, height: 900 }); await page.screenshot({ path: path.join(output, `folder-${width}.png`), fullPage: true }); }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.click('#workspace-picker');
+  await page.waitForSelector('.project-entry');
+  assert.match(await page.locator('.project-entry').first().textContent(), /验收项目/);
+  await page.click('#close-project'); await page.waitForSelector('#landing-project'); await expectCount('[data-folder]', 0);
+  await page.evaluate(() => window.projects = []);
+  await page.click('#close-dialog'); await page.click('#workspace-picker');
+  await page.waitForSelector('.projects-empty');
+  assert.match(await page.locator('.projects-empty').textContent(), /暂无项目/);
+  await page.screenshot({ path: path.join(output, 'projects-empty.png'), fullPage: true });
+  await page.click('#create-project'); await page.waitForSelector('#project-name-input');
+  assert.equal(await page.inputValue('#project-name-input'), '项目01');
+  await page.click('#new-project-form [type=submit]');
+  await page.waitForFunction(() => window.createdProjects.length === 1);
+  await page.waitForFunction(() => document.querySelector('#project-name').textContent === '项目01');
+  assert.equal(await page.evaluate(() => window.createdProjects[0].parent), 'C:/Documents/RecDog/Projects');
+  await page.click('#workspace-picker'); await page.waitForSelector('.project-entry');
+  await page.click('#create-project'); await page.waitForSelector('#project-name-input');
+  assert.equal(await page.inputValue('#project-name-input'), '项目02');
+  await page.click('#choose-project-parent'); await page.waitForFunction(() => document.querySelector('#project-parent').textContent === 'C:/custom-projects');
+  await page.click('#new-project-form [type=submit]');
+  await page.waitForFunction(() => document.querySelector('#project-name').textContent === '项目02');
+  await page.click('#workspace-picker'); await page.waitForSelector('[data-project-index]');
+  await page.click('[data-project-index="0"]');
+  await page.waitForFunction(() => document.querySelector('#project-name').textContent === '项目01');
+  await page.click('#new-folder'); await page.fill('#name-input', '人员乙'); await page.click('#name-form button[type=submit]');
+  await page.click('#new-folder'); await page.fill('#name-input', '人员丙'); await page.click('#name-form button[type=submit]');
+  await expectCount('[data-folder]', 2);
+  await page.locator('[data-folder]').last().click();
+  assert.equal(await page.locator('[data-folder]').first().isVisible(), true, '收起后仍能看到其他人员');
+  await page.screenshot({ path: path.join(output, 'person-tree-collapsed.png'), fullPage: true });
+  assert.deepEqual(errors, []);
+  console.log('PASS browser: folder/create, 4x5 table, project-scoped template edit/delete, save-failure close protection, editor release, recording controls, project close, 3 viewport screenshots');
+} finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }

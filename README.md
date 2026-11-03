@@ -1,51 +1,37 @@
 # RecDog · 听录
 
-面向访谈、会议和模板化记录的单人 Windows 桌面工具。目标流程是：创建项目 → 选择模板 → 录音与转写 → 编辑文档 → 确认正式版本 → 导出 DOCX。单机优先，不强制登录；AI 整理是可选处理。
+Windows 本地文档和录音工具，采用 WPF + WebView2 + canvas-editor。当前支持项目/人员资料管理、文档编辑和 DOCX 导入导出、模板管理及本地 MP3 录音；转写尚未接入。
 
-## 当前状态
+## 打开软件
 
-**规划与工程初始化阶段，尚不可用于正式录音或记录。**
+双击项目根目录的 `Start-RecDog.cmd`。当前构建程序在 `artifacts/app-recording-workflow/RecDog.exe`。本机脚本使用 `D:\DevTools\dotnet`，无需修改系统环境变量。
 
-- 已有需求、产品设计、技术方案、ADR 和静态参考原型。
-- 已建立 WPF/.NET 工程骨架；窗口仅用于启动检查，无业务功能。
-- 尚未完成编译、真实模板、四小时录音、中文转写或发行验收。
-- 首先开展风险验证 MVP；验证通过后逐阶段实现完整 V1，不把原型演示当成产品交付。
+运行需要 .NET 10 Desktop Runtime 和 WebView2 Runtime；当前为依赖本机运行时的目录构建，尚未制作安装包。不能只复制 EXE，需保留整个程序目录。
 
-## 开发与运行
+点击左侧当前项目打开项目管理，列表显示本机创建或打开过的项目及路径。无项目时显示新增提示。新增项目默认按“项目01、项目02……”命名，在“文档/RecDog/Projects”下自动创建同名文件夹，也可选择其他父目录；打开已有项目仍可选择项目文件夹。可重命名、关闭或删除当前项目。点击人员名称展开或收起其下的文档与录音，收起不会关闭当前编辑页，其他人员仍可见。项目内先创建人员文件夹，再创建或打开具体文档，从文档底部开始录音；人员首页和模板编辑不能开始录音。自建模板可编辑、删除；内置模板保留。
 
-前提：Windows、Git、支持 WPF 的 .NET 10 SDK。仅安装 .NET 运行时不能构建项目。
+旧版资料仍在 `src/RecDog.Desktop/bin/Release/net10.0-windows/data/workspace`，可通过“打开项目”选择该目录。程序兼容 schemaVersion 1；首次写入后升级 schemaVersion 2，原有项目级文档保留。新版默认数据位置是程序目录内的 `data/workspace`，也可使用自选项目目录。
+
+## 录音与恢复
+
+录音前可在底部选择 Windows 麦克风，并刷新设备列表；录音期间锁定设备并显示实际设备名。声音方格来自真实 PCM 输入，仅录音期间显示，暂停时熄灭，停止后隐藏；持续低音量或接近满幅时显示提示。左右栏边缘支持拖动调整宽度并记住设置，列表独立滚动。左侧按创建时间从早到晚并列展示文档/录音及时间，保存不改变新文档的位置。点击录音可在编辑页面回放，省略号菜单支持导出 MP3、打开所在文件夹、复制路径。开始后可暂停、继续、停止并保存；录音保存在开始时的人员下，新录音的界面名称和磁盘 MP3 名称保持一致，采用人员名、开始时文档名及时间命名，重名自动追加序号；已有录音文件不自动改名。不建立文档与录音的固定关联；可在编辑页面回放 MP3。关闭程序会等待保存。设备故障或编码失败时，提示中会给出恢复 WAV 的路径。
+
+文档/录音/人员删除前在项目 `.trash` 保存原 workspace.json，媒体移入该目录；整个项目删除后移入同级 `.RecDog-trash`。恢复前请先备份当前项目，根据快照中的路径还原媒体，再恢复 workspace.json。删除项目不会清空回收目录。
+
+## 开发与验证
+
+执行 `scripts/build.ps1` 构建到 `artifacts/app-recording-workflow`，运行前端构建需要 Node 24、pnpm。更新前先关闭新版窗口；旧版位于独立目录，可继续保留。
+
+依赖说明见 `THIRD_PARTY_NOTICES.md`。内部设计文档及本机验证产物不随源码上传。
+
+首次开发：安装 .NET 10 SDK、Node 24、pnpm，执行 `pnpm --dir frontend install --frozen-lockfile`，再运行 `scripts/build.ps1`。
+
+验证：
 
 ```powershell
-dotnet --info
-dotnet restore RecDog.slnx
-dotnet build RecDog.slnx -c Release --no-restore
-dotnet run --project src/RecDog.Desktop/RecDog.Desktop.csproj
+dotnet run --project tests/RecDog.Core.Tests
+dotnet run --project tests/RecDog.Audio.Tests
+node --test frontend/tests/*.test.mjs
+pnpm --dir frontend exec playwright install msedge
+node frontend/tests/browser.mjs
 ```
-
-当前初始化环境只有 .NET 6 运行时，没有 SDK，故上述构建与启动尚未实测。目标 Windows 版本支持和最终 SDK 补丁版本需在 MVP 阶段验证并锁定；不承诺所有 Windows 10 版本兼容。
-
-测试目录暂为职责说明，尚未建立测试项目；不应将 `dotnet test` 无用例视作通过。无需安装 Word/WPS 的目标也尚未验收。
-
-## 技术方向
-
-候选方案为 C# / WPF / MVVM、SQLite、NAudio/WASAPI、FFmpeg、sherpa-onnx、Open XML SDK。本次骨架只使用 .NET/WPF 标准组件；其余依赖待实测和许可证核对后固定版本。
-
-这是桌面应用，不部署 Web 后端。Desktop 负责交互和应用协调，Core 负责领域规则，Infrastructure 负责设备、文件、存储和服务适配。录音采集、本机转写按计划由独立进程隔离。
-
-## 目录
-
-| 目录 | 用途 |
-| --- | --- |
-| [prototype](prototype/) | 静态参考原型 |
-| [src](src/) | 正式应用工程骨架 |
-| `tests/`（本地预留） | 测试目录，尚未建立测试项目 |
-
-## 数据与版本管理
-
-仓库跟踪源代码、工程配置和本 README。内部需求、设计、调研、开发计划及其他文档保留在本地，不纳入 Git 跟踪。真实录音、个人项目、模型、密钥、日志和构建产物同样不入库；默认忽略规则见 [.gitignore](.gitignore)。真实模板使用前需脱敏。
-
-GitHub 仓库：https://github.com/Lizuxb/RecDog
-
-## 许可证
-
-尚未选择开源许可证；公开代码不等于授予开源使用许可。

@@ -1,0 +1,26 @@
+const paths: Record<string, string> = {
+  file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h6"/>',
+  folder: '<path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  save: '<path d="m19 21-14 0a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12l4 4v12a2 2 0 0 1-2 2Z"/><path d="M7 3v6h10V3M7 21v-8h10v8"/>',
+  upload: '<path d="M12 16V3m-5 5 5-5 5 5M4 16v5h16v-5"/>',
+  download: '<path d="M12 3v13m-5-5 5 5 5-5M4 16v5h16v-5"/>',
+  undo: '<path d="M3 10h11a6 6 0 0 1 0 12M3 10l5-5m-5 5 5 5"/>',
+  redo: '<path d="M21 10H10a6 6 0 0 0 0 12m11-12-5-5m5 5-5 5"/>',
+  search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
+  outline: '<path d="M9 5h12M9 12h12M9 19h12M3 5h1M3 12h1M3 19h1"/>',
+  template: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 9v12"/>',
+  settings: '<path d="m12 3 2 3 4-.2.3 4 2.7 2.2-2.7 2.2-.3 4-4-.2-2 3-2-3-4 .2-.3-4L3 12l2.7-2.2.3-4 4 .2Z"/><circle cx="12" cy="12" r="3"/>',
+  check: '<path d="m5 12 4 4L19 6"/>',
+  close: '<path d="m6 6 12 12M6 18 18 6"/>',
+  alignLeft: '<path d="M4 5h16M4 10h10M4 15h16M4 20h10"/>',
+  alignCenter: '<path d="M4 5h16M7 10h10M4 15h16M7 20h10"/>',
+  alignRight: '<path d="M4 5h16M10 10h10M4 15h16M10 20h10"/>',
+  list: '<path d="M9 5h12M9 12h12M9 19h12M3 5h1M3 12h1M3 19h1"/>',
+  table: '<rect x="3" y="4" width="18" height="16" rx="1"/><path d="M3 10h18M3 15h18M10 4v16M16 4v16"/>',
+  menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/>',
+  arrow: '<path d="m9 5 7 7-7 7"/>',
+  page: '<rect x="5" y="2" width="14" height="20" rx="1"/><path d="M9 7h6M9 11h6M9 15h4"/>'
+};
+export function icon(name: string) { return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.file}</svg>`; }

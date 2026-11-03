@@ -1,0 +1,21 @@
+{
+  "name": "recdog-editor",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "test": "node --test tests/*.test.mjs",
+    "test:browser": "node tests/browser.mjs"
+  },
+  "dependencies": {
+    "@hufe921/canvas-editor": "1.0.6",
+    "@hufe921/canvas-editor-plugin-docx": "1.0.0"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vite": "8.3.5",
+    "playwright": "1.58.2"
+  }
+}
