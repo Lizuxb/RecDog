@@ -16,6 +16,8 @@
 
 RecDog brings document editing, audio recording and speech transcription into one desktop workspace for interviews, meetings and everyday notes. Organize your work by project and person, start with a template, and export documents and recordings when needed.
 
+> RecDog is under active development. All features still need further rounds of testing and refinement. Feedback is welcome; please back up important files.
+
 ## Features
 
 - **Organization**: Keep documents and recordings together in project and person folders.
